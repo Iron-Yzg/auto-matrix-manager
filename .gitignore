@@ -1,0 +1,48 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+dist-srv
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.claude
+
+# Project specific
+.spec-workflow
+.vscode
+demo
+*.lock
+pnpm-lock.yaml
+
+# Tauri
+src-tauri/target
+src-tauri/.env
+src-tauri/.env.*
+!src-tauri/.env.example
+target/
+target/flycheck0
+
+# OS
+Thumbs.db
+*.bak
+*~
