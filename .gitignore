@@ -46,3 +46,5 @@ target/flycheck0
 Thumbs.db
 *.bak
 *~
+
+python
