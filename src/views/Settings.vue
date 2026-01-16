@@ -14,8 +14,6 @@ const credentials = ref<Record<Platform, PlatformCredentials>>({
   bilibili: { accessKey: '', accessSecret: '' }
 })
 
-const getPlatformInfo = (platform: Platform) => PLATFORMS.find(p => p.id === platform)!
-
 const handleSave = (platform: Platform) => {
   console.log('Saving credentials for:', platform, credentials.value[platform])
 }

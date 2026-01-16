@@ -1,0 +1,230 @@
+// Tauri API Service
+// 使用 Tauri invoke 调用后端命令
+
+import { invoke } from '@tauri-apps/api/core'
+
+// Types matching the backend UserAccount
+export interface UserAccount {
+  id: string
+  username: string
+  nickname: string
+  avatar_url: string
+  platform: PlatformType
+  params: string
+  status: AccountStatus
+  created_at: string
+}
+
+export type PlatformType = 'Douyin' | 'Xiaohongshu' | 'Kuaishou' | 'Bilibili'
+export type AccountStatus = 'Active' | 'Expired' | 'Pending'
+
+export interface PlatformInfo {
+  id: string
+  name: string
+  icon: string
+  color: string
+}
+
+// Platform list (can be fetched from backend in the future)
+export const PLATFORMS: PlatformInfo[] = [
+  { id: 'douyin', name: '抖音', icon: '/src/assets/icons/douyin.png', color: '#000000' },
+  { id: 'xiaohongshu', name: '小红书', icon: '/src/assets/icons/xiaohongshu.ico', color: '#FE2C55' },
+  { id: 'kuaishou', name: '快手', icon: '/src/assets/icons/kuaohou.ico', color: '#FF4906' },
+  { id: 'bilibili', name: 'B站', icon: '/src/assets/icons/bilibili.ico', color: '#00A1D6' },
+]
+
+// API Functions
+
+/**
+ * Get supported platforms
+ */
+export async function getSupportedPlatforms(): Promise<PlatformInfo[]> {
+  try {
+    return await invoke<PlatformInfo[]>('get_supported_platforms')
+  } catch (error) {
+    console.error('Failed to get platforms:', error)
+    return PLATFORMS
+  }
+}
+
+/**
+ * Get accounts for a platform
+ */
+export async function getAccounts(platform: string): Promise<UserAccount[]> {
+  try {
+    return await invoke<UserAccount[]>('get_accounts', { platform })
+  } catch (error) {
+    console.error('Failed to get accounts:', error)
+    throw error
+  }
+}
+
+/**
+ * Add a new account
+ */
+export async function addAccount(
+  platform: string,
+  username: string,
+  nickname: string,
+  avatarUrl: string,
+  params: string
+): Promise<UserAccount> {
+  try {
+    return await invoke<UserAccount>('add_account', {
+      platform,
+      username,
+      nickname,
+      avatar_url: avatarUrl,
+      params,
+    })
+  } catch (error) {
+    console.error('Failed to add account:', error)
+    throw error
+  }
+}
+
+/**
+ * Delete an account
+ */
+export async function deleteAccount(accountId: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>('delete_account', { accountId })
+  } catch (error) {
+    console.error('Failed to delete account:', error)
+    throw error
+  }
+}
+
+/**
+ * Get publications for an account
+ */
+export async function getPublications(
+  platform: string,
+  accountId: string
+): Promise<any[]> {
+  try {
+    return await invoke<any[]>('get_publications', { platform, accountId })
+  } catch (error) {
+    console.error('Failed to get publications:', error)
+    throw error
+  }
+}
+
+/**
+ * Publish a video
+ */
+export async function publishVideo(
+  platform: string,
+  accountId: string,
+  videoPath: string,
+  title: string,
+  description: string,
+  hashtags: string[]
+): Promise<any> {
+  try {
+    return await invoke('publish_video', {
+      platform,
+      accountId,
+      videoPath,
+      title,
+      description,
+      hashtags,
+    })
+  } catch (error) {
+    console.error('Failed to publish video:', error)
+    throw error
+  }
+}
+
+// Helper functions for type conversion
+
+/**
+ * Convert backend UserAccount to frontend Account format
+ */
+export function toFrontendAccount(account: UserAccount): {
+  id: string
+  platform: string
+  accountName: string
+  avatar: string
+  status: 'active' | 'expired' | 'pending'
+  authorizedAt: string
+} {
+  return {
+    id: account.id,
+    platform: account.platform.toLowerCase(),
+    accountName: account.nickname || account.username,
+    avatar: account.avatar_url,
+    status: account.status.toLowerCase() as 'active' | 'expired' | 'pending',
+    authorizedAt: account.created_at,
+  }
+}
+
+/**
+ * Convert platform type to lowercase string
+ */
+export function toPlatformString(platform: PlatformType): string {
+  return platform.toLowerCase()
+}
+
+// ============================================================================
+// Browser Automation Functions
+// 浏览器自动化功能
+// ============================================================================
+
+/**
+ * Browser authentication status
+ */
+export interface BrowserAuthStatus {
+  step: string
+  message: string
+  currentUrl: string
+  screenshot: string | null
+  needPoll: boolean
+  cookie: string
+  localStorage: string
+  nickname: string
+  avatarUrl: string
+  error: string | null
+}
+
+/**
+ * Start browser authentication flow for a platform
+ * This launches a headless browser and navigates to the platform's login page
+ */
+export async function startBrowserAuth(platform: string): Promise<BrowserAuthStatus> {
+  console.log('[API] Starting browser auth for platform:', platform)
+  try {
+    const result = await invoke<BrowserAuthStatus>('start_browser_auth', { platform })
+    console.log('[API] Browser auth started successfully:', result)
+    return result
+  } catch (error: any) {
+    console.error('[API] Failed to start browser auth:', error)
+    // 返回一个错误状态，让前端显示错误信息
+    throw error
+  }
+}
+
+/**
+ * Check browser authentication status and extract credentials if logged in
+ * This should be called periodically to poll for login completion
+ */
+export async function checkBrowserAuthStatus(): Promise<BrowserAuthStatus> {
+  try {
+    return await invoke<BrowserAuthStatus>('check_browser_auth_status')
+  } catch (error) {
+    console.error('Failed to check auth status:', error)
+    throw error
+  }
+}
+
+/**
+ * Cancel browser authentication
+ */
+export async function cancelBrowserAuth(): Promise<void> {
+  try {
+    await invoke('cancel_browser_auth')
+  } catch (error) {
+    console.error('Failed to cancel auth:', error)
+    throw error
+  }
+}

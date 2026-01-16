@@ -2,34 +2,22 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import Hls from 'hls.js'
-import { PLATFORMS, type Platform, type Account, type Publication } from '../types'
+import { PLATFORMS, type Platform } from '../types'
+import { getAccounts, toFrontendAccount } from '../services/api'
 
 const router = useRouter()
 
-const accounts = ref<Account[]>([
-  { id: '1', platform: 'douyin', accountName: '抖音测试号', avatar: '', status: 'active', authorizedAt: '' },
-  { id: '2', platform: 'xiaohongshu', accountName: '小红书运营号', avatar: '', status: 'active', authorizedAt: '' },
-  { id: '3', platform: 'kuaishou', accountName: '快手创作号', avatar: '', status: 'active', authorizedAt: '' },
-  { id: '4', platform: 'bilibili', accountName: 'B站UP主', avatar: '', status: 'active', authorizedAt: '' }
-])
+const accounts = ref<Array<{
+  id: string
+  platform: string
+  accountName: string
+  avatar: string
+  status: 'active' | 'expired' | 'pending'
+  authorizedAt: string
+}>>([])
 
-const publications = ref<Publication[]>([
-  {
-    id: '1', videoPath: '/videos/test-video.mp4', coverPath: '/covers/cover1.jpg',
-    title: '我的第一个视频', description: '这是一个测试视频', status: 'completed', createdAt: '2024-01-15 10:30:00',
-    publishedAccounts: [
-      { id: 'p1', accountId: '1', platform: 'douyin', accountName: '抖音测试号', status: 'success', publishUrl: 'https://douyin.com/video/123', publishTime: '2024-01-15 10:35:00', stats: { comments: 128, likes: 2560, favorites: 512, shares: 128 } }
-    ]
-  },
-  {
-    id: '2', videoPath: '/videos/demo.mp4', coverPath: '/covers/cover2.jpg',
-    title: '产品介绍视频', description: '详细介绍我们的产品功能', status: 'publishing', createdAt: '2024-01-15 14:20:00',
-    publishedAccounts: [
-      { id: 'p2', accountId: '2', platform: 'xiaohongshu', accountName: '小红书运营号', status: 'publishing', stats: { comments: 0, likes: 0, favorites: 0, shares: 0 } },
-      { id: 'p3', accountId: '3', platform: 'kuaishou', accountName: '快手创作号', status: 'success', publishTime: '2024-01-15 14:25:00', stats: { comments: 45, likes: 890, favorites: 120, shares: 30 } }
-    ]
-  }
-])
+const publications = ref<any[]>([])
+const loading = ref(false)
 
 const searchQuery = ref('')
 const platformFilter = ref<Platform | 'all'>('all')
@@ -39,6 +27,7 @@ const showPublishDialog = ref(false)
 const currentStep = ref(1)
 const selectedVideo = ref<File | null>(null)
 const selectedCover = ref<File | null>(null)
+const coverUrl = computed(() => selectedCover.value ? URL.createObjectURL(selectedCover.value) : '')
 const selectedAccounts = ref<string[]>([])
 const videoTitle = ref('')
 const videoDescription = ref('')
@@ -48,16 +37,45 @@ const videoUrl = ref('')
 const videoElement = ref<HTMLVideoElement | null>(null)
 let hls: Hls | null = null
 
+const loadAccounts = async () => {
+  try {
+    const backendAccounts = await getAccounts('douyin')
+    accounts.value = backendAccounts.map(toFrontendAccount)
+  } catch (error) {
+    console.error('Failed to load accounts:', error)
+    accounts.value = []
+  }
+}
+
+const loadPublications = async () => {
+  loading.value = true
+  try {
+    // TODO: Replace with actual API call when publications API is ready
+    publications.value = []
+  } catch (error) {
+    console.error('Failed to load publications:', error)
+    publications.value = []
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
+  loadAccounts()
+  loadPublications()
+})
+
 const filteredPublications = computed(() => {
   return publications.value.filter(pub => {
-    const matchesSearch = pub.title.toLowerCase().includes(searchQuery.value.toLowerCase()) || pub.description.toLowerCase().includes(searchQuery.value.toLowerCase())
-    const matchesPlatform = platformFilter.value === 'all' || pub.publishedAccounts.some(pa => pa.platform === platformFilter.value)
+    const matchesSearch = pub.title?.toLowerCase().includes(searchQuery.value.toLowerCase()) ||
+                          pub.description?.toLowerCase().includes(searchQuery.value.toLowerCase())
+    const matchesPlatform = platformFilter.value === 'all' || pub.platform === platformFilter.value
     const matchesStatus = statusFilter.value === 'all' || pub.status === statusFilter.value
     return matchesSearch && matchesPlatform && matchesStatus
   })
 })
 
-const getPlatformInfo = (platform: Platform) => PLATFORMS.find(p => p.id === platform)!
+const getPlatformInfo = (platform: string) => PLATFORMS.find(p => p.id === platform) || PLATFORMS[0]
 
 const getStatusConfig = (status: string) => {
   switch (status) {
@@ -111,14 +129,17 @@ const toggleAccountSelection = (accountId: string) => {
 }
 
 const selectAllAccounts = () => {
-  selectedAccounts.value = accounts.value.map(a => a.id)
+  selectedAccounts.value = accounts.value.filter(a => a.status === 'active').map(a => a.id)
 }
 
 const deselectAllAccounts = () => {
   selectedAccounts.value = []
 }
 
-const allSelected = computed(() => accounts.value.length > 0 && selectedAccounts.value.length === accounts.value.length)
+const allSelected = computed(() => {
+  const activeAccounts = accounts.value.filter(a => a.status === 'active')
+  return activeAccounts.length > 0 && selectedAccounts.value.length === activeAccounts.length
+})
 
 const nextStep = () => { if (currentStep.value < 2) currentStep.value++ }
 const prevStep = () => { if (currentStep.value > 1) currentStep.value-- }
@@ -137,7 +158,7 @@ const openPublishDialog = () => {
 
 const handlePublish = () => {
   if (!selectedVideo.value || selectedAccounts.value.length === 0) return
-  const newPublication: Publication = {
+  const newPublication = {
     id: Date.now().toString(),
     videoPath: selectedVideo.value.name,
     coverPath: selectedCover.value?.name || '',
@@ -201,7 +222,10 @@ onUnmounted(() => {
 
     <!-- Publication List -->
     <div class="flex-1 bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
-      <div class="overflow-y-auto flex-1">
+      <div v-if="loading" class="flex-1 flex items-center justify-center">
+        <div class="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+      <div v-else class="overflow-y-auto flex-1">
         <table class="w-full">
           <thead class="bg-slate-50 border-b border-slate-200 sticky top-0">
             <tr>
@@ -231,7 +255,7 @@ onUnmounted(() => {
               </td>
               <td class="px-6 py-3">
                 <div class="flex -space-x-2">
-                  <div v-for="(pa, idx) in pub.publishedAccounts.slice(0, 4)" :key="idx" class="w-7 h-7 rounded-full bg-white border-2 border-white flex items-center justify-center shadow-sm">
+                  <div v-for="(pa, idx) in (pub.publishedAccounts || []).slice(0, 4)" :key="idx" class="w-7 h-7 rounded-full bg-white border-2 border-white flex items-center justify-center shadow-sm">
                     <img :src="getPlatformInfo(pa.platform).icon" :alt="pa.accountName" class="w-4 h-4 object-contain" />
                   </div>
                 </div>
@@ -242,8 +266,8 @@ onUnmounted(() => {
                   {{ getStatusConfig(pub.status).text }}
                 </span>
               </td>
-              <td class="px-6 py-3 text-sm text-slate-600">{{ formatNumber(pub.publishedAccounts.reduce((sum, pa) => sum + pa.stats.comments, 0)) }}</td>
-              <td class="px-6 py-3 text-sm text-slate-600">{{ formatNumber(pub.publishedAccounts.reduce((sum, pa) => sum + pa.stats.likes, 0)) }}</td>
+              <td class="px-6 py-3 text-sm text-slate-600">{{ formatNumber((pub.publishedAccounts || []).reduce((sum: number, pa: any) => sum + (pa.stats?.comments || 0), 0)) }}</td>
+              <td class="px-6 py-3 text-sm text-slate-600">{{ formatNumber((pub.publishedAccounts || []).reduce((sum: number, pa: any) => sum + (pa.stats?.likes || 0), 0)) }}</td>
               <td class="px-6 py-3 text-sm text-slate-500">{{ pub.createdAt }}</td>
               <td class="px-6 py-3">
                 <div class="flex items-center justify-end gap-2">
@@ -257,7 +281,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Empty State -->
-      <div v-if="filteredPublications.length === 0" class="py-12 text-center">
+      <div v-if="!loading && filteredPublications.length === 0" class="py-12 text-center">
         <div class="w-16 h-16 mx-auto mb-3 rounded-full bg-slate-100 flex items-center justify-center">
           <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
@@ -299,7 +323,7 @@ onUnmounted(() => {
             <div class="w-1/2">
               <label class="block text-sm font-semibold text-slate-700 mb-2">视频封面</label>
               <div class="aspect-video rounded-xl bg-slate-100 border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden relative group">
-                <img v-if="selectedCover" :src="URL.createObjectURL(selectedCover)" class="w-full h-full object-cover" />
+                <img v-if="selectedCover" :src="coverUrl" class="w-full h-full object-cover" />
                 <div v-else class="text-center">
                   <svg class="w-8 h-8 text-slate-400 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -383,7 +407,7 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100">
-                <tr v-for="account in accounts" :key="account.id" class="hover:bg-slate-50/80 transition-colors">
+                <tr v-for="account in accounts.filter(a => a.status === 'active')" :key="account.id" class="hover:bg-slate-50/80 transition-colors">
                   <td class="px-2 py-3">
                     <input type="checkbox" :checked="selectedAccounts.includes(account.id)" @change="toggleAccountSelection(account.id)" class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500" />
                   </td>
@@ -405,6 +429,9 @@ onUnmounted(() => {
                 </tr>
               </tbody>
             </table>
+            <p v-if="accounts.filter(a => a.status === 'active').length === 0" class="text-center py-8 text-sm text-slate-400">
+              暂无已授权账号，请先添加账号
+            </p>
           </div>
         </div>
 
