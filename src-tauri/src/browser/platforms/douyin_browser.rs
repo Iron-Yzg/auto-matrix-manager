@@ -1,18 +1,29 @@
-// Douyin Browser Implementation
-// 抖音浏览器自动化实现
+// Douyin Browser Implementation - 重写版本
+// 参考 Python douyin_account_bind.py 实现
 
 use crate::browser::{BrowserAuthResult, BrowserAuthStep};
-use headless_chrome::{Browser, LaunchOptions};
+use headless_chrome::{Browser, LaunchOptions, Tab};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use serde::{Deserialize, Serialize};
 
-/// 抖音浏览器实现 - 使用统一的授权类型
+/// API 响应数据
+#[derive(Debug, Clone, Default)]
+struct ApiResponseData {
+    user_info: Option<serde_json::Value>,
+    account_info: Option<serde_json::Value>,
+}
+
+/// 抖音浏览器实现 - 重写版本
 pub struct DouyinBrowser {
     browser: Option<Browser>,
-    tab: Option<Arc<headless_chrome::Tab>>,
+    tab: Option<Arc<Tab>>,
     result: BrowserAuthResult,
     /// 自定义 Chrome 浏览器路径
     chrome_path: Option<PathBuf>,
+    /// 等待超时时间（秒）
+    timeout_seconds: u32,
 }
 
 impl DouyinBrowser {
@@ -22,6 +33,7 @@ impl DouyinBrowser {
             tab: None,
             result: BrowserAuthResult::default(),
             chrome_path: None,
+            timeout_seconds: 120,
         }
     }
 
@@ -32,142 +44,380 @@ impl DouyinBrowser {
             tab: None,
             result: BrowserAuthResult::default(),
             chrome_path: Some(path),
+            timeout_seconds: 120,
         }
     }
 
-    /// 注入API拦截器
-    fn inject_api_interceptor(&self) {
+    /// 设置超时时间
+    pub fn with_timeout(mut self, seconds: u32) -> Self {
+        self.timeout_seconds = seconds;
+        self
+    }
+
+    /// 启动浏览器
+    fn launch_browser(&self) -> Result<Browser, String> {
+        eprintln!("[DouyinBrowser] Launch options: path={:?}", self.chrome_path);
+
+        let launch_options = LaunchOptions::default_builder()
+            .headless(false)
+            .window_size(Some((1280, 800)))
+            .path(self.chrome_path.clone())
+            .build()
+            .map_err(|e| format!("构建启动选项失败: {}", e))?;
+
+        Browser::new(launch_options)
+            .map_err(|e| format!("启动浏览器失败: {}", e))
+    }
+
+    /// 等待 URL 变化到指定模式
+    fn wait_for_url(&self, tab: &Tab, pattern: &str, timeout_secs: u32) -> bool {
+        eprintln!("[DouyinBrowser] Waiting for URL pattern: {}", pattern);
+        let start = std::time::Instant::now();
+
+        while start.elapsed().as_secs() < timeout_secs as u64 {
+            let url = tab.get_url();
+            eprintln!("[DouyinBrowser] Current URL: {}", url);
+
+            if url.contains(pattern) {
+                eprintln!("[DouyinBrowser] ✓ URL matched: {}", pattern);
+                return true;
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        eprintln!("[DouyinBrowser] ✗ URL pattern not found within timeout: {}", pattern);
+        false
+    }
+
+    /// 注入 API 拦截器
+    fn inject_api_interceptor(&self, tab: &Tab) -> bool {
+        eprintln!("[DouyinBrowser] Injecting API interceptor...");
+
         let interceptor_script = r#"
             (function() {
                 // 初始化数据存储
                 window.__API_DATA__ = {
                     userInfo: null,
-                    accountInfo: null
+                    accountInfo: null,
+                    interceptCount: 0
                 };
-                
-                console.log('[API] Installing interceptor...');
-                
+
+                console.log('[API Interceptor] Installing...');
+
                 // 拦截 fetch
                 const originalFetch = window.fetch;
                 window.fetch = function(...args) {
                     const url = args[0];
-                    console.log('[API] Fetch called:', url);
-                    
+                    const method = args[1]?.method || 'GET';
+
+                    console.log('[API Interceptor] Fetch:', method, url);
+
                     return originalFetch.apply(this, args).then(response => {
                         const clonedResponse = response.clone();
-                        
+
+                        // 拦截用户信息 API
                         if (url.includes('/web/api/media/user/info')) {
-                            console.log('[API] ✓ Intercepted user info API');
+                            console.log('[API Interceptor] ✓ Intercepted user info API');
+                            window.__API_DATA__.interceptCount++;
+
                             clonedResponse.json().then(data => {
                                 window.__API_DATA__.userInfo = data;
-                                console.log('[API] ✓ User info saved:', data);
-                            }).catch(e => console.error('[API] ✗ Error parsing user info:', e));
-                        } else if (url.includes('/account/api/v1/user/account/info')) {
-                            console.log('[API] ✓ Intercepted account info API');
+                                console.log('[API Interceptor] ✓ User info saved, count:', window.__API_DATA__.interceptCount);
+                                console.log('[API Interceptor] User data:', JSON.stringify(data).substring(0, 200));
+                            }).catch(e => console.error('[API Interceptor] ✗ Error parsing user info:', e));
+                        }
+                        // 拦截账号信息 API
+                        else if (url.includes('/account/api/v1/user/account/info')) {
+                            console.log('[API Interceptor] ✓ Intercepted account info API');
+                            window.__API_DATA__.interceptCount++;
+
                             clonedResponse.json().then(data => {
                                 window.__API_DATA__.accountInfo = data;
-                                console.log('[API] ✓ Account info saved:', data);
-                            }).catch(e => console.error('[API] ✗ Error parsing account info:', e));
+                                console.log('[API Interceptor] ✓ Account info saved, count:', window.__API_DATA__.interceptCount);
+                                console.log('[API Interceptor] Account data:', JSON.stringify(data).substring(0, 200));
+                            }).catch(e => console.error('[API Interceptor] ✗ Error parsing account info:', e));
                         }
-                        
+
                         return response;
                     });
                 };
-                
+
                 // 拦截 XMLHttpRequest
-                const originalOpen = XMLHttpRequest.prototype.open;
-                const originalSend = XMLHttpRequest.prototype.send;
-                
+                const originalXHROpen = XMLHttpRequest.prototype.open;
+                const originalXHRSend = XMLHttpRequest.prototype.send;
+
                 XMLHttpRequest.prototype.open = function(method, url, ...rest) {
                     this._url = url;
-                    console.log('[API] XHR open:', url);
-                    return originalOpen.apply(this, [method, url, ...rest]);
+                    this._method = method;
+                    console.log('[API Interceptor] XHR:', method, url);
+                    return originalXHROpen.apply(this, [method, url, ...rest]);
                 };
-                
+
                 XMLHttpRequest.prototype.send = function(...args) {
-                    this.addEventListener('load', function() {
+                    this.addEventListener('load', () => {
                         const url = this._url;
-                        
+
                         if (url.includes('/web/api/media/user/info')) {
                             try {
                                 const data = JSON.parse(this.responseText);
                                 window.__API_DATA__.userInfo = data;
-                                console.log('[API] ✓ User info saved (XHR):', data);
+                                window.__API_DATA__.interceptCount++;
+                                console.log('[API Interceptor] ✓ User info saved (XHR), count:', window.__API_DATA__.interceptCount);
                             } catch (e) {
-                                console.error('[API] ✗ Error parsing user info (XHR):', e);
+                                console.error('[API Interceptor] ✗ Error parsing user info (XHR):', e);
                             }
                         } else if (url.includes('/account/api/v1/user/account/info')) {
                             try {
                                 const data = JSON.parse(this.responseText);
                                 window.__API_DATA__.accountInfo = data;
-                                console.log('[API] ✓ Account info saved (XHR):', data);
+                                window.__API_DATA__.interceptCount++;
+                                console.log('[API Interceptor] ✓ Account info saved (XHR), count:', window.__API_DATA__.interceptCount);
                             } catch (e) {
-                                console.error('[API] ✗ Error parsing account info (XHR):', e);
+                                console.error('[API Interceptor] ✗ Error parsing account info (XHR):', e);
                             }
                         }
                     });
-                    
-                    return originalSend.apply(this, args);
+
+                    return originalXHRSend.apply(this, args);
                 };
-                
-                console.log('[API] ✓ Interceptor installed successfully');
-                return { success: true };
+
+                console.log('[API Interceptor] ✓ Installed successfully');
+                return { success: true, count: window.__API_DATA__.interceptCount };
             })()
         "#;
 
-        if let Some(tab) = &self.tab {
-            match tab.evaluate(interceptor_script, true) {
-                Ok(_) => {
-                    eprintln!("[DouyinBrowser] ✓ API interceptor injected successfully");
-                },
-                Err(e) => {
-                    eprintln!("[DouyinBrowser] ✗ Failed to inject API interceptor: {}", e);
-                }
+        match tab.evaluate(interceptor_script, true) {
+            Ok(result) => {
+                eprintln!("[DouyinBrowser] API interceptor injected result: {:?}", result);
+                true
+            }
+            Err(e) => {
+                eprintln!("[DouyinBrowser] ✗ Failed to inject API interceptor: {}", e);
+                false
             }
         }
     }
 
-    /// 注入 CDC 提示浮层
-    fn inject_tip_overlay(&self) {
-        // 根据当前步骤生成不同的提示信息
-        let tip_message = match &self.result.step {
-            BrowserAuthStep::WaitingForLogin => "请使用抖音App扫码登录<br>登录成功后页面将自动跳转",
-            BrowserAuthStep::LoginDetected => "检测到登录成功，正在跳转...",
-            BrowserAuthStep::NavigatingToUpload => "正在跳转到上传页面...",
-            BrowserAuthStep::WaitingForUpload => "正在准备提取凭证...",
-            BrowserAuthStep::ExtractingCredentials => "正在提取凭证，请稍候...",
-            BrowserAuthStep::ClosingBrowser => "正在关闭浏览器...",
-            BrowserAuthStep::Completed => "授权完成！",
-            _ => "授权助手正在运行",
-        };
+    /// 等待 API 数据被拦截
+    fn wait_for_api_data(&self, tab: &Tab, expected_count: u32, timeout_secs: u32) -> bool {
+        eprintln!("[DouyinBrowser] Waiting for API data (expected count: {})...", expected_count);
 
-        let status_class = match &self.result.step {
-            BrowserAuthStep::WaitingForLogin => "等待扫码登录...",
-            BrowserAuthStep::ExtractingCredentials | BrowserAuthStep::WaitingForUpload => "正在加载凭证...",
-            BrowserAuthStep::Completed => "授权成功！",
-            _ => "处理中...",
-        };
+        let start = std::time::Instant::now();
 
+        while start.elapsed().as_secs() < timeout_secs as u64 {
+            let check_script = r#"
+                (function() {
+                    const data = window.__API_DATA__ || {interceptCount: 0};
+                    return JSON.stringify({
+                        count: data.interceptCount,
+                        hasUserInfo: !!data.userInfo,
+                        hasAccountInfo: !!data.accountInfo
+                    });
+                })()
+            "#;
+
+            match tab.evaluate(check_script, true) {
+                Ok(result) => {
+                    if let Some(value) = result.value {
+                        if let Some(s) = value.as_str() {
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(s) {
+                                let count = data.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let has_user = data.get("hasUserInfo").and_then(|v| v.as_bool()).unwrap_or(false);
+                                let has_account = data.get("hasAccountInfo").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                                eprintln!("[DouyinBrowser] API data status: count={}, hasUser={}, hasAccount={}",
+                                    count, has_user, has_account);
+
+                                if count >= expected_count as u64 || (has_user && has_account) {
+                                    eprintln!("[DouyinBrowser] ✓ API data received!");
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[DouyinBrowser] Error checking API data: {}", e);
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        eprintln!("[DouyinBrowser] ✗ API data not received within timeout");
+        false
+    }
+
+    /// 获取 API 拦截的数据
+    fn get_api_data(&self, tab: &Tab) -> ApiResponseData {
+        let script = r#"
+            (function() {
+                return JSON.stringify(window.__API_DATA__ || {
+                    userInfo: null,
+                    accountInfo: null
+                });
+            })()
+        "#;
+
+        let mut result = ApiResponseData::default();
+
+        if let Ok(response) = tab.evaluate(script, true) {
+            if let Some(value) = response.value {
+                if let Some(s) = value.as_str() {
+                    eprintln!("[DouyinBrowser] API data raw: {}", s);
+
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(s) {
+                        result.user_info = data.get("userInfo").cloned();
+                        result.account_info = data.get("accountInfo").cloned();
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// 获取 localStorage 数据
+    fn get_local_storage(&self, tab: &Tab) -> Vec<LocalStorageItem> {
+        let keys = vec![
+            "security-sdk/s_sdk_cert_key",
+            "security-sdk/s_sdk_crypt_sdk",
+            "security-sdk/s_sdk_pri_key",
+            "security-sdk/s_sdk_pub_key",
+            "security-sdk/s_sdk_server_cert_key",
+            "security-sdk/s_sdk_sign_data_key/token",
+            "security-sdk/s_sdk_sign_data_key/web_protect",
+        ];
+
+        let mut items = Vec::new();
+
+        for key in &keys {
+            let script = format!(r#"
+                (function() {{
+                    try {{
+                        const value = localStorage.getItem('{}');
+                        if (value) {{
+                            // security-sdk/s_sdk_cert_key 需要检查是否包含 pub.
+                            if ('{}'.includes('s_sdk_cert_key') && !value.includes('pub.')) {{
+                                return null;
+                            }}
+                            return JSON.stringify({{
+                                key: '{}',
+                                value: value
+                            }});
+                        }}
+                        return null;
+                    }} catch (e) {{
+                        return null;
+                    }}
+                }})()
+            "#, key, key, key);
+
+            match tab.evaluate(&script, true) {
+                Ok(result) => {
+                    if let Some(value) = result.value {
+                        if let Some(s) = value.as_str() {
+                            if let Ok(item) = serde_json::from_str::<LocalStorageItem>(s) {
+                                items.push(item);
+                                eprintln!("[DouyinBrowser] Got localStorage: {}", key);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[DouyinBrowser] Error getting localStorage {}: {}", key, e);
+                }
+            }
+        }
+
+        items
+    }
+
+    /// 获取 cookies
+    fn get_cookies(&self, tab: &Tab) -> String {
+        match tab.get_cookies() {
+            Ok(cookies) => {
+                let parts: Vec<String> = cookies.iter()
+                    .map(|c| format!("{}={}", c.name, c.value))
+                    .collect();
+                let cookie_str = parts.join("; ");
+                eprintln!("[DouyinBrowser] Got {} cookies", cookies.len());
+                cookie_str
+            }
+            Err(e) => {
+                eprintln!("[DouyinBrowser] Error getting cookies: {}", e);
+                String::new()
+            }
+        }
+    }
+
+    /// 从 API 数据中提取用户信息
+    fn extract_user_info(&self, api_data: &ApiResponseData) -> (String, String, String) {
+        let mut uid = String::new();
+        let mut nickname = String::new();
+        let mut avatar_url = String::new();
+
+        // 从 user_info 中提取
+        if let Some(user_info) = &api_data.user_info {
+            eprintln!("[DouyinBrowser] Parsing user_info: {}", user_info);
+
+            // 获取 uid
+            if let Some(user) = user_info.get("user") {
+                if let Some(u) = user.get("uid").and_then(|v| v.as_str()) {
+                    uid = u.to_string();
+                }
+                // 获取昵称
+                if let Some(nick) = user.get("nickname").and_then(|v| v.as_str()) {
+                    nickname = nick.to_string();
+                }
+                // 获取头像
+                if let Some(avatar) = user.get("avatar_thumb")
+                    .and_then(|v| v.get("url_list"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.as_str())
+                {
+                    avatar_url = avatar.to_string();
+                }
+            }
+        }
+
+        // 从 account_info 中补充信息
+        if let Some(account_info) = &api_data.account_info {
+            eprintln!("[DouyinBrowser] Parsing account_info: {}", account_info);
+
+            // 如果没有昵称，尝试从 account_info 获取
+            if nickname.is_empty() {
+                if let Some(display_name) = account_info.get("display_name")
+                    .or_else(|| account_info.get("nickname"))
+                    .and_then(|v| v.as_str())
+                {
+                    nickname = display_name.to_string();
+                }
+            }
+        }
+
+        if nickname.is_empty() {
+            nickname = "抖音用户".to_string();
+        }
+
+        (uid, nickname, avatar_url)
+    }
+
+    /// 注入提示浮层
+    fn inject_tip_overlay(&self, tab: &Tab, message: &str) {
         let tip_script = format!(r#"
             (function() {{
-                console.log('[AMM] Starting tip injection...');
-
-                // 移除已存在的提示
                 const existing = document.getElementById('amm-tip-overlay');
                 if (existing) {{
-                    console.log('[AMM] Removing existing tip overlay');
                     existing.remove();
                 }}
 
-                // 检查 body 是否存在
                 if (!document.body) {{
-                    console.log('[AMM] document.body does not exist yet');
                     return {{ success: false, error: 'body not exists' }};
                 }}
 
-                console.log('[AMM] Creating tip overlay...');
-
-                // 创建提示浮层
                 const tip = document.createElement('div');
                 tip.id = 'amm-tip-overlay';
                 tip.innerHTML = `
@@ -192,95 +442,62 @@ impl DouyinBrowser {
                         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
                     ">
                         <div style="display: flex !important; align-items: center !important; gap: 10px !important;">
-                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="display: block !important;">
+                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="none" stroke="currentColor"></path>
                                 <path d="M12 8v4" fill="none" stroke="currentColor"></path>
                                 <path d="M12 16h.01" fill="none" stroke="currentColor"></path>
                             </svg>
-                            <span style="display: block !important;">授权助手正在运行</span>
+                            <span style="display: block !important;">授权助手</span>
                         </div>
                         <span style="text-align: center !important; opacity: 0.95 !important; font-weight: 400 !important; line-height: 1.5 !important; display: block !important;">
-                            {tip_message}
+                            {}
                         </span>
-                        <div id="amm-login-status" style="
-                            font-size: 12px !important;
-                            padding: 6px 12px !important;
-                            background: rgba(255,255,255,0.2) !important;
-                            border-radius: 20px !important;
-                            font-weight: 400 !important;
-                            display: block !important;
-                        ">{status_class}</div>
                     </div>
-                    <style>
-                        @keyframes amm-slide-down {{
-                            from {{ opacity: 0 !important; transform: translateX(-50%) translateY(-30px) !important; }}
-                            to {{ opacity: 1 !important; transform: translateX(-50%) translateY(0) !important; }}
-                        }}
-                        @keyframes amm-pulse {{
-                            0%, 100% {{ opacity: 1 !important; }}
-                            50% {{ opacity: 0.7 !important; }}
-                        }}
-                        #amm-login-status {{
-                            animation: amm-pulse 2s infinite !important;
-                        }}
-                        #amm-tip-overlay {{
-                            animation: amm-slide-down 0.4s ease-out !important;
-                        }}
-                    </style>
                 `;
 
-                // 使用 prepend 确保在 body 最前面
                 document.body.insertBefore(tip, document.body.firstChild);
+                console.log('[AMM] Tip overlay inserted');
 
-                console.log('[AMM] Tip overlay inserted successfully');
-
-                // 验证 tip 是否存在
-                const tipEl = document.getElementById('amm-tip-overlay');
-                if (tipEl) {{
-                    const style = window.getComputedStyle(tipEl);
-                    return {{
-                        success: true,
-                        display: style.display,
-                        visibility: style.visibility,
-                        zIndex: style.zIndex
-                    }};
-                }}
-                return {{ success: false, error: 'tip element not found after insert' }};
+                return {{ success: true }};
             }})();
-        "#);
+        "#, message);
 
-        if let Some(tab) = &self.tab {
-            match tab.evaluate(&tip_script, true) {  // true = return_by_value
-                Ok(result) => {
-                    eprintln!("[DouyinBrowser] Tip injection result: {:?}", result);
-                },
-                Err(e) => eprintln!("[DouyinBrowser] Failed to inject tip overlay: {}", e),
-            }
+        if let Err(e) = tab.evaluate(&tip_script, true) {
+            eprintln!("[DouyinBrowser] Failed to inject tip overlay: {}", e);
         }
     }
 
-    /// 启动浏览器
-    fn launch_browser(&self) -> Result<Browser, String> {
-        eprintln!("[DouyinBrowser] Launch options: path={:?}", self.chrome_path);
+    /// 移除提示浮层
+    fn remove_tip_overlay(&self, tab: &Tab) {
+        let script = r#"
+            (function() {
+                const existing = document.getElementById('amm-tip-overlay');
+                if (existing) {
+                    existing.remove();
+                    return { success: true };
+                }
+                return { success: false, notFound: true };
+            })()
+        "#;
 
-        // 构建启动选项 - 设置 headless=false 以显示浏览器窗口
-        let launch_options = LaunchOptions::default_builder()
-            .headless(false)  // 显示窗口而不是 headless 模式
-            .window_size(Some((1280, 800)))  // 设置窗口大小
-            .path(self.chrome_path.clone())
-            .build()
-            .map_err(|e| format!("构建启动选项失败: {}", e))?;
-
-        // 启动浏览器
-        Browser::new(launch_options)
-            .map_err(|e| format!("启动浏览器失败: {}", e))
+        if let Err(e) = tab.evaluate(script, true) {
+            eprintln!("[DouyinBrowser] Failed to remove tip overlay: {}", e);
+        }
     }
 
-    /// 启动抖音授权流程
+    /// 关闭浏览器
+    fn close_browser(&mut self) {
+        eprintln!("[DouyinBrowser] Closing browser...");
+        self.tab = None;
+        self.browser = None;
+        eprintln!("[DouyinBrowser] Browser closed");
+    }
+
+    /// 启动抖音授权流程 - 重写版本
     pub async fn start_authorize(&mut self) -> Result<BrowserAuthResult, String> {
         self.result.step = BrowserAuthStep::LaunchingBrowser;
         self.result.message = "正在启动浏览器...".to_string();
-        eprintln!("[DouyinBrowser] Launching browser...");
+        eprintln!("[DouyinBrowser] ===== Starting authorization =====");
 
         // 启动浏览器
         self.browser = match self.launch_browser() {
@@ -290,7 +507,7 @@ impl DouyinBrowser {
             }
             Err(e) => {
                 let err_msg = format!("无法启动浏览器: {}", e);
-                eprintln!("[DouyinBrowser] Failed to launch browser: {}", e);
+                eprintln!("[DouyinBrowser] ✗ {}", err_msg);
                 self.result.step = BrowserAuthStep::Failed(err_msg.clone());
                 self.result.message = err_msg.clone();
                 self.result.error = Some(err_msg.clone());
@@ -298,676 +515,331 @@ impl DouyinBrowser {
             }
         };
 
-        // 获取初始标签页
-        let browser_ref = self.browser.as_ref().expect("Browser should be Some");
+        // 创建新标签页
+        let browser_ref = self.browser.as_ref().expect("Browser should exist");
         let initial_tab = browser_ref
             .new_tab()
             .map_err(|e| format!("创建标签页失败: {}", e))?;
         self.tab = Some(initial_tab);
-        eprintln!("[DouyinBrowser] Created new tab");
+        let tab = self.tab.as_ref().unwrap();
 
+        eprintln!("[DouyinBrowser] Tab created");
+
+        // 步骤1: 导航到创作者中心
         self.result.step = BrowserAuthStep::OpeningLoginPage;
-        self.result.message = "正在打开登录页面...".to_string();
-        eprintln!("[DouyinBrowser] Navigating to https://creator.douyin.com/...");
-
-        // 导航到抖音创作者中心
-        self.tab.as_ref().unwrap().navigate_to("https://creator.douyin.com/")
+        self.result.message = "正在打开创作者中心...".to_string();
+        tab.navigate_to("https://creator.douyin.com/")
             .map_err(|e| format!("导航失败: {}", e))?;
-
-        // 等待页面加载
-        self.tab.as_ref().unwrap().wait_until_navigated()
+        tab.wait_until_navigated()
             .map_err(|e| format!("等待导航失败: {}", e))?;
 
-        eprintln!("[DouyinBrowser] Page navigated, waiting for content to load...");
+        eprintln!("[DouyinBrowser] Navigated to creator.douyin.com");
+        std::thread::sleep(Duration::from_secs(2));
 
-        // 等待页面完全加载（抖音创作者中心需要加载动态内容）
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        // 注入提示
+        self.inject_tip_overlay(tab, "请使用抖音App扫码登录，登录成功后页面将自动跳转");
 
-        // 检查页面是否加载了主要内容
-        let body_check = self.tab.as_ref().unwrap().evaluate(
-            r#"(function() {
-                const body = document.body;
-                return {
-                    hasContent: body && body.children.length > 0,
-                    childCount: body ? body.children.length : 0,
-                    readyState: document.readyState
-                };
-            })()"#,
-            true  // return_by_value: true 执行函数并返回值
-        );
-        eprintln!("[DouyinBrowser] Page body check: {:?}", body_check);
+        // 步骤2: 等待登录并跳转到创作者中心首页
+        self.result.step = BrowserAuthStep::WaitingForLogin;
+        self.result.message = "请扫码登录...".to_string();
 
-        // 注入提示浮层
-        eprintln!("[DouyinBrowser] Injecting tip overlay...");
-        self.inject_tip_overlay();
+        eprintln!("[DouyinBrowser] Waiting for login and redirect to home page...");
 
-        // 获取当前 URL
-        let current_url = self.tab.as_ref().unwrap().get_url();
-        self.result.current_url = current_url.clone();
-        eprintln!("[DouyinBrowser] Current URL after navigation: {}", current_url);
-
-        // 检查是否已经登录（页面可能已经自动重定向）
-        eprintln!("[DouyinBrowser] Checking if already logged in...");
-
-        // 等待可能的自动重定向，增加等待时间
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        let updated_url = self.tab.as_ref().unwrap().get_url();
-        eprintln!("[DouyinBrowser] URL after wait: {}", updated_url);
-
-        // 检测是否已经在创作者中心
-        if updated_url.contains("creator.douyin.com/creator-micro") {
-            eprintln!("[DouyinBrowser] Already logged in! Detected creator-micro URL");
-
-            // 重新注入提示浮层
-            self.inject_tip_overlay();
-
-            // 检测是否在首页
-            let is_home_page = updated_url.contains("/creator-micro/home")
-                || updated_url.ends_with("/creator-micro/");
-
-            if is_home_page {
-                // 在首页，先注入API拦截器，然后跳转到上传页面
-                self.result.step = BrowserAuthStep::NavigatingToUpload;
-                self.result.message = "检测到已登录，正在跳转到上传页面...".to_string();
-                eprintln!("[DouyinBrowser] On home page, injecting API interceptor before navigation...");
-
-                // 先注入API拦截器（在导航之前）
-                self.inject_api_interceptor();
-
-                // 立即跳转到上传页面
-                match self.tab.as_ref().unwrap().navigate_to("https://creator.douyin.com/creator-micro/content/upload") {
-                    Ok(_) => {
-                        eprintln!("[DouyinBrowser] Navigation to upload page initiated");
-                        if let Ok(_) = self.tab.as_ref().unwrap().wait_until_navigated() {
-                            // 等待页面加载和API调用完成（增加等待时间）
-                            eprintln!("[DouyinBrowser] Waiting for page to load and API calls to complete...");
-                            std::thread::sleep(std::time::Duration::from_secs(6));
-                            self.inject_tip_overlay();
-                            let upload_url = self.tab.as_ref().unwrap().get_url();
-                            eprintln!("[DouyinBrowser] Successfully navigated to upload page: {}", upload_url);
-                            
-                            // 立即开始提取凭证
-                            eprintln!("[DouyinBrowser] Starting credential extraction immediately...");
-                            self.result.step = BrowserAuthStep::ExtractingCredentials;
-                            self.result.message = "正在提取凭证...".to_string();
-                            self.result.current_url = upload_url;
-
-                            // 立即提取凭证
-                            let tab_for_extract = self.tab.clone().unwrap();
-                            match self.extract_credentials(tab_for_extract.as_ref()).await {
-                                Ok(_) => {
-                                    eprintln!("[DouyinBrowser] Cookie: {} bytes", self.result.cookie.len());
-                                    eprintln!("[DouyinBrowser] LocalStorage: {} bytes", self.result.local_storage.len());
-                                    eprintln!("[DouyinBrowser] Nickname: {}", self.result.nickname);
-
-                                    // 检查是否成功提取到凭证
-                                    if self.result.cookie.is_empty() {
-                                        // 凭证未完全加载，继续等待
-                                        eprintln!("[DouyinBrowser] Credentials not ready, will retry in polling...");
-                                        self.result.step = BrowserAuthStep::WaitingForUpload;
-                                        self.result.message = "正在加载凭证，请稍候...".to_string();
-                                        self.result.need_poll = true;
-                                    } else {
-                                        // 关闭浏览器
-                                        self.result.step = BrowserAuthStep::ClosingBrowser;
-                                        self.result.message = "正在关闭浏览器...".to_string();
-                                        self.close_browser().await;
-
-                                        self.result.step = BrowserAuthStep::Completed;
-                                        self.result.message = format!("授权完成！账号: {}", self.result.nickname);
-                                        self.result.need_poll = false;
-
-                                        eprintln!("[DouyinBrowser] Authorization completed successfully in initialization");
-                                        return Ok(self.result.clone());
-                                    }
-                                },
-                                Err(e) => {
-                                    eprintln!("[DouyinBrowser] Failed to extract credentials: {}", e);
-                                    self.result.step = BrowserAuthStep::WaitingForUpload;
-                                    self.result.message = "凭证提取失败，将在轮询中重试...".to_string();
-                                    self.result.need_poll = true;
-                                }
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[DouyinBrowser] Failed to navigate to upload page: {}", e);
-                        self.result.message = "跳转到上传页面失败，将在轮询中重试...".to_string();
-                    }
-                }
-                self.result.need_poll = true;
-            } else {
-                // 已经在其他创作者中心页面（如上传页面），准备提取凭证
-                self.result.step = BrowserAuthStep::WaitingForUpload;
-                self.result.message = "检测到已登录，正在准备提取凭证...".to_string();
-                self.result.need_poll = true;
-                eprintln!("[DouyinBrowser] On creator page, will extract credentials on next poll");
+        // 等待 URL 变化到 creator-micro/home
+        if !self.wait_for_url(tab, "/creator-micro/home", self.timeout_seconds) {
+            // 超时，尝试手动检查
+            let current_url = tab.get_url();
+            if !current_url.contains("creator.douyin.com/creator-micro") {
+                let err_msg = "等待登录超时，请确保扫码登录".to_string();
+                eprintln!("[DouyinBrowser] ✗ {}", err_msg);
+                self.result.step = BrowserAuthStep::Failed(err_msg.clone());
+                self.result.message = err_msg.clone();
+                self.result.error = Some(err_msg.clone());
+                self.close_browser();
+                return Err(err_msg);
             }
-        } else if updated_url == "https://creator.douyin.com/" || updated_url == "https://creator.douyin.com" {
-            // 在根路径，等待更长时间看是否会自动重定向
-            eprintln!("[DouyinBrowser] On root path, waiting longer for potential auto-redirect...");
-            
-            // 等待更长时间，抖音可能需要更多时间来检查登录状态
-            std::thread::sleep(std::time::Duration::from_secs(8));
-            
-            let final_check_url = self.tab.as_ref().unwrap().get_url();
-            eprintln!("[DouyinBrowser] URL after extended wait: {}", final_check_url);
-            
-            if final_check_url.contains("creator.douyin.com/creator-micro") {
-                // 自动重定向到了创作者中心
-                eprintln!("[DouyinBrowser] Auto-redirected to creator-micro, user is logged in!");
-                
-                // 重新注入提示浮层
-                self.inject_tip_overlay();
-                
-                // 检测是否在首页
-                let is_home_page = final_check_url.contains("/creator-micro/home")
-                    || final_check_url.ends_with("/creator-micro/");
-
-                if is_home_page {
-                    // 在首页，立即跳转到上传页面
-                    self.result.step = BrowserAuthStep::NavigatingToUpload;
-                    self.result.message = "检测到已登录，正在跳转到上传页面...".to_string();
-                    eprintln!("[DouyinBrowser] On home page, navigating to upload page immediately...");
-
-                    // 立即跳转到上传页面
-                    match self.tab.as_ref().unwrap().navigate_to("https://creator.douyin.com/creator-micro/content/upload") {
-                        Ok(_) => {
-                            eprintln!("[DouyinBrowser] Navigation to upload page initiated");
-                            if let Ok(_) = self.tab.as_ref().unwrap().wait_until_navigated() {
-                                std::thread::sleep(std::time::Duration::from_secs(3));
-                                self.inject_tip_overlay();
-                                let upload_url = self.tab.as_ref().unwrap().get_url();
-                                eprintln!("[DouyinBrowser] Successfully navigated to upload page: {}", upload_url);
-                                self.result.step = BrowserAuthStep::WaitingForUpload;
-                                self.result.message = "已跳转到上传页面，正在准备提取凭证...".to_string();
-                                self.result.current_url = upload_url;
-                            }
-                        },
-                        Err(e) => {
-                            eprintln!("[DouyinBrowser] Failed to navigate to upload page: {}", e);
-                            self.result.message = "跳转到上传页面失败，将在轮询中重试...".to_string();
-                        }
-                    }
-                    self.result.need_poll = true;
-                } else {
-                    // 已经在其他创作者中心页面
-                    self.result.step = BrowserAuthStep::WaitingForUpload;
-                    self.result.message = "检测到已登录，正在准备提取凭证...".to_string();
-                    self.result.need_poll = true;
-                }
-            } else {
-                // 仍在根路径，设置为等待登录状态，让轮询来处理后续检测
-                eprintln!("[DouyinBrowser] Still on root path, setting up for polling...");
-                self.result.step = BrowserAuthStep::WaitingForLogin;
-                self.result.message = "请扫码登录，页面将自动跳转".to_string();
-                self.result.need_poll = true;
-            }
-        } else {
-            // 未登录，等待扫码
-            self.result.step = BrowserAuthStep::WaitingForLogin;
-            self.result.message = "请扫码登录，页面将自动跳转".to_string();
-            self.result.need_poll = true;
-            eprintln!("[DouyinBrowser] Not logged in, waiting for scan");
         }
+
+        // 更新 URL
+        self.result.current_url = tab.get_url();
+        eprintln!("[DouyinBrowser] Reached creator center: {}", self.result.current_url);
+
+        // 步骤3: 注入 API 拦截器
+        self.result.step = BrowserAuthStep::LoginDetected;
+        self.result.message = "登录成功，正在准备提取数据...".to_string();
+        self.inject_tip_overlay(tab, "登录成功，正在准备提取数据...");
+
+        eprintln!("[DouyinBrowser] Injecting API interceptor...");
+        self.inject_api_interceptor(tab);
+
+        // 等待一下让拦截器生效
+        std::thread::sleep(Duration::from_secs(1));
+
+        // 步骤4: 导航到上传页面触发 API 调用
+        self.result.step = BrowserAuthStep::NavigatingToUpload;
+        self.result.message = "正在跳转到上传页面以获取API数据...".to_string();
+        self.inject_tip_overlay(tab, "正在获取用户数据，请稍候...");
+
+        eprintln!("[DouyinBrowser] Navigating to upload page to trigger API calls...");
+
+        // 导航到上传页面
+        tab.navigate_to("https://creator.douyin.com/creator-micro/content/upload")
+            .map_err(|e| format!("导航到上传页面失败: {}", e))?;
+        tab.wait_until_navigated()
+            .map_err(|e| format!("等待导航失败: {}", e))?;
+
+        eprintln!("[DouyinBrowser] Navigated to upload page");
+
+        // 等待 API 数据被拦截
+        self.result.step = BrowserAuthStep::ExtractingCredentials;
+        self.result.message = "正在提取用户数据...".to_string();
+        self.inject_tip_overlay(tab, "正在提取用户数据...");
+
+        // 等待 API 调用完成（需要至少2个响应）
+        if !self.wait_for_api_data(tab, 2, 30u32) {
+            eprintln!("[DouyinBrowser] Warning: API data not fully received, but continuing...");
+        }
+
+        // 额外等待确保数据完整
+        std::thread::sleep(Duration::from_secs(2));
+
+        // 步骤5: 提取数据
+        eprintln!("[DouyinBrowser] Extracting data...");
+
+        // 获取 API 拦截的数据
+        let api_data = self.get_api_data(tab);
+        let (uid, nickname, avatar_url) = self.extract_user_info(&api_data);
+
+        eprintln!("[DouyinBrowser] User info - uid: {}, nickname: {}", uid, nickname);
+
+        // 获取 cookies
+        let cookie = self.get_cookies(tab);
+
+        // 获取 localStorage
+        let local_storage_items = self.get_local_storage(tab);
+
+        // 构建 third_param（参考 Python 版本）
+        let third_param = ThirdParam {
+            cookie: cookie.clone(),
+            local_data: local_storage_items.clone(),
+            // 这些从 API 请求头中获取，暂时使用空字符串
+            accept: "application/json".to_string(),
+            referer: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page".to_string(),
+            user_agent: "".to_string(),
+            sec_ch_ua: "".to_string(),
+            sec_fetch_dest: "".to_string(),
+            sec_fetch_mode: "".to_string(),
+            sec_fetch_site: "".to_string(),
+            accept_encoding: "".to_string(),
+            accept_language: "".to_string(),
+            sec_ch_ua_mobile: "".to_string(),
+            sec_ch_ua_platform: "".to_string(),
+            x_secsdk_csrf_token: "".to_string(),
+        };
+
+        // 构建结果
+        let _result_data = DouyinAuthResult {
+            third_id: uid.parse().unwrap_or(0),
+            third_param,
+            third_return: api_data.user_info.clone().unwrap_or(serde_json::json!({})),
+            all_cookies: cookie.clone(),
+        };
+
+        // 序列化 params（用于存储）
+        let _params_json = serde_json::to_string(&DouyinAuthResult {
+            third_id: uid.parse().unwrap_or(0),
+            third_param: ThirdParam {
+                cookie: cookie.clone(),
+                local_data: local_storage_items.clone(),
+                accept: "application/json".to_string(),
+                referer: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page".to_string(),
+                user_agent: "".to_string(),
+                sec_ch_ua: "".to_string(),
+                sec_fetch_dest: "".to_string(),
+                sec_fetch_mode: "".to_string(),
+                sec_fetch_site: "".to_string(),
+                accept_encoding: "".to_string(),
+                accept_language: "".to_string(),
+                sec_ch_ua_mobile: "".to_string(),
+                sec_ch_ua_platform: "".to_string(),
+                x_secsdk_csrf_token: "".to_string(),
+            },
+            third_return: api_data.user_info.clone().unwrap_or(serde_json::json!({})),
+            all_cookies: cookie.clone(),
+        }).map_err(|e| format!("序列化params失败: {}", e))?;
+
+        // 更新结果
+        self.result.cookie = cookie;
+        self.result.local_storage = serde_json::to_string(&local_storage_items)
+            .unwrap_or_default();
+        self.result.nickname = nickname.clone();
+        self.result.avatar_url = avatar_url;
+        self.result.step = BrowserAuthStep::Completed;
+        self.result.message = format!("授权完成！账号: {}", nickname);
+        self.result.need_poll = false;
+
+        eprintln!("[DouyinBrowser] ===== Authorization completed =====");
+        eprintln!("[DouyinBrowser] Nickname: {}", nickname);
+        eprintln!("[DouyinBrowser] UID: {}", uid);
+
+        // 关闭浏览器
+        self.close_browser();
 
         Ok(self.result.clone())
     }
 
-    /// 检查登录状态并提取凭证
+    /// 检查登录状态并提取凭证（轮询模式）
     pub async fn check_and_extract(&mut self) -> Result<bool, String> {
+        eprintln!("[DouyinBrowser] check_and_extract called");
+
         let tab = match self.tab.as_ref() {
-            Some(t) => t,
+            Some(t) => t.clone(),
             None => {
-                eprintln!("[DouyinBrowser] Tab is None, browser may have been closed");
+                eprintln!("[DouyinBrowser] Tab is None");
                 return Ok(false);
             }
         };
 
-        // 获取当前 URL
+        // 强制刷新页面获取最新 URL（使用 navigate_to 当前 URL 来刷新）
+        let current_url_for_refresh = tab.get_url();
+        let _ = tab.navigate_to(&current_url_for_refresh);
+        std::thread::sleep(Duration::from_millis(500));
+
         let current_url = tab.get_url();
         self.result.current_url = current_url.clone();
-        eprintln!("[DouyinBrowser] Checking URL: {}", current_url);
+        eprintln!("[DouyinBrowser] Current URL (refreshed): {}", current_url);
 
-        // 在所有页面上注入 CDC 提示信息
-        self.inject_tip_overlay();
+        // 注入提示
+        self.inject_tip_overlay(&tab, &self.result.message);
 
-        // 检测是否在登录页面
-        let is_on_login_page = current_url.contains("passport.douyin.com")
-            || current_url.contains("douyin.com/login")
-            || current_url.contains("login.douyin.com");
+        // 精确检查是否在创作者中心首页
+        let is_home_page = current_url.contains("/creator-micro/home")
+            || current_url.ends_with("/creator-micro/")
+            || current_url == "https://creator.douyin.com/creator-micro";
 
-        if is_on_login_page {
-            // 仍在登录页面
-            self.result.step = BrowserAuthStep::WaitingForLogin;
-            self.result.message = "请扫码登录...".to_string();
-            self.result.need_poll = true;
-            return Ok(true);
-        }
+        eprintln!("[DouyinBrowser] Is home page: {}", is_home_page);
 
-        // 检测是否在抖音创作者中心域名下（登录成功后会跳转到这个域名）
-        let is_on_creator_domain = current_url.contains("creator.douyin.com/creator-micro");
-        eprintln!("[DouyinBrowser] Is on creator domain: {}", is_on_creator_domain);
+        if is_home_page {
+            eprintln!("[DouyinBrowser] On home page, starting extraction...");
 
-        if is_on_creator_domain {
-            // 已经在创作者中心，说明登录成功了
-            eprintln!("[DouyinBrowser] Detected login success!");
+            // 注入 API 拦截器
+            self.inject_api_interceptor(&tab);
 
-            // 检测是否在首页
-            let is_home_page = current_url.contains("/creator-micro/home")
-                || current_url.ends_with("/creator-micro/");
-
-            eprintln!("[DouyinBrowser] Is on home page: {}", is_home_page);
-
-            if is_home_page {
-                // 在首页，先注入API拦截器，然后跳转到上传页面
-                self.result.step = BrowserAuthStep::NavigatingToUpload;
-                self.result.message = "正在跳转到上传页面...".to_string();
-                eprintln!("[DouyinBrowser] Injecting API interceptor before navigation...");
-                
-                // 先注入API拦截器
-                self.inject_api_interceptor();
-
-                eprintln!("[DouyinBrowser] Navigating to upload page...");
-                match tab.navigate_to("https://creator.douyin.com/creator-micro/content/upload") {
-                    Ok(_) => {
-                        eprintln!("[DouyinBrowser] Navigation initiated, waiting...");
-                        
-                        if let Ok(_) = tab.wait_until_navigated() {
-                            // 等待页面加载和API调用完成（增加等待时间）
-                            eprintln!("[DouyinBrowser] Waiting for page to load and API calls to complete...");
-                            std::thread::sleep(std::time::Duration::from_secs(6));
-
-                            // 重新注入提示信息
-                            self.inject_tip_overlay();
-
-                            let upload_url = tab.get_url();
-                            eprintln!("[DouyinBrowser] Upload page URL: {}", upload_url);
-
-                            // 检查是否成功跳转到上传页面
-                            if upload_url.contains("/creator-micro/content/upload") {
-                                // 成功跳转到上传页面，立即开始提取凭证
-                                eprintln!("[DouyinBrowser] Successfully navigated to upload page, starting credential extraction...");
-                                
-                                self.result.step = BrowserAuthStep::ExtractingCredentials;
-                                self.result.message = "正在提取凭证...".to_string();
-                                self.result.current_url = upload_url;
-
-                                // 立即提取凭证
-                                let tab_for_extract = self.tab.clone().unwrap();
-                                self.extract_credentials(tab_for_extract.as_ref()).await?;
-
-                                eprintln!("[DouyinBrowser] Cookie: {} bytes", self.result.cookie.len());
-                                eprintln!("[DouyinBrowser] LocalStorage: {} bytes", self.result.local_storage.len());
-                                eprintln!("[DouyinBrowser] Nickname: {}", self.result.nickname);
-
-                                // 检查是否成功提取到凭证
-                                if self.result.cookie.is_empty() {
-                                    // 凭证未完全加载，继续等待
-                                    eprintln!("[DouyinBrowser] Credentials not ready, waiting...");
-                                    self.result.step = BrowserAuthStep::WaitingForUpload;
-                                    self.result.message = "正在加载凭证，请稍候...".to_string();
-                                    self.result.need_poll = true;
-                                    return Ok(true);
-                                }
-
-                                // 关闭浏览器
-                                self.result.step = BrowserAuthStep::ClosingBrowser;
-                                self.result.message = "正在关闭浏览器...".to_string();
-                                self.close_browser().await;
-
-                                self.result.step = BrowserAuthStep::Completed;
-                                self.result.message = format!("授权完成！账号: {}", self.result.nickname);
-                                self.result.need_poll = false;
-
-                                eprintln!("[DouyinBrowser] Authorization completed successfully");
-                                return Ok(false);
-                            } else {
-                                // 跳转可能失败，继续轮询
-                                eprintln!("[DouyinBrowser] Upload page navigation may have failed, URL: {}", upload_url);
-                                self.result.step = BrowserAuthStep::WaitingForUpload;
-                                self.result.message = "正在准备提取凭证...".to_string();
-                                self.result.need_poll = true;
-                                return Ok(true);
-                            }
-                        } else {
-                            eprintln!("[DouyinBrowser] Navigation wait failed");
-                        }
-                        
-                        // 导航可能失败，继续轮询
-                        self.result.message = "正在跳转到上传页面，请稍候...".to_string();
-                        self.result.need_poll = true;
-                        return Ok(true);
-                    },
-                    Err(e) => {
-                        eprintln!("[DouyinBrowser] Navigation failed: {}", e);
-                        self.result.message = "跳转失败，正在重试...".to_string();
-                        self.result.need_poll = true;
-                        return Ok(true);
-                    }
+            // 导航到上传页面触发 API
+            match tab.navigate_to("https://creator.douyin.com/creator-micro/content/upload") {
+                Ok(_) => {
+                    tab.wait_until_navigated()
+                        .map_err(|e| format!("等待导航失败: {}", e))?;
+                }
+                Err(e) => {
+                    eprintln!("[DouyinBrowser] 导航失败: {}", e);
                 }
             }
 
-            // 在上传页面或其他创作者中心页面，直接提取凭证
-            eprintln!("[DouyinBrowser] On creator micro page, extracting credentials...");
+            // 等待 API 数据
+            std::thread::sleep(Duration::from_secs(3));
 
-            self.result.step = BrowserAuthStep::ExtractingCredentials;
-            self.result.message = "正在提取凭证...".to_string();
-
-            // 克隆 tab 引用以解决生命周期问题
-            let tab_for_extract = self.tab.clone().unwrap();
-            self.extract_credentials(tab_for_extract.as_ref()).await?;
-
-            eprintln!("[DouyinBrowser] Cookie: {} bytes", self.result.cookie.len());
-            eprintln!("[DouyinBrowser] LocalStorage: {} bytes", self.result.local_storage.len());
-            eprintln!("[DouyinBrowser] Nickname: {}", self.result.nickname);
-
-            // 检查是否成功提取到凭证
-            if self.result.cookie.is_empty() {
-                // 凭证未完全加载，继续等待
-                eprintln!("[DouyinBrowser] Credentials not ready, waiting...");
-                self.result.message = "正在加载凭证，请稍候...".to_string();
-                self.result.need_poll = true;
-                return Ok(true);
-            }
-
-            // 关闭浏览器
-            self.result.step = BrowserAuthStep::ClosingBrowser;
-            self.result.message = "正在关闭浏览器...".to_string();
-            self.close_browser().await;
-
-            self.result.step = BrowserAuthStep::Completed;
-            self.result.message = format!("授权完成！账号: {}", self.result.nickname);
-            self.result.need_poll = false;
-
-            eprintln!("[DouyinBrowser] Authorization completed successfully");
+            // 提取数据
+            self.extract_and_save(&tab).await?;
 
             return Ok(false);
         }
 
-        // 检测是否是根路径
-        if current_url == "https://creator.douyin.com/" || current_url == "https://creator.douyin.com" {
-            eprintln!("[DouyinBrowser] On root path, checking for login status...");
+        // 检查是否在上传页面
+        if current_url.contains("/content/upload") {
+            eprintln!("[DouyinBrowser] On upload page, extracting...");
 
-            // 等待页面加载和可能的重定向
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            // 注入 API 拦截器（如果还没有）
+            self.inject_api_interceptor(&tab);
 
-            // 检查是否有自动重定向
-            let new_url = tab.get_url();
-            eprintln!("[DouyinBrowser] After wait, URL: {}", new_url);
+            // 等待 API 数据
+            std::thread::sleep(Duration::from_secs(3));
 
-            if new_url.contains("creator.douyin.com/creator-micro") {
-                // 自动重定向到了创作者中心，说明已登录
-                eprintln!("[DouyinBrowser] Auto-redirected to creator-micro, user is logged in!");
-                
-                // 重新注入提示
-                self.inject_tip_overlay();
-                
-                self.result.step = BrowserAuthStep::NavigatingToUpload;
-                self.result.message = "检测到已登录，正在跳转到上传页面...".to_string();
-                self.result.need_poll = true;
-                return Ok(true);
-            }
+            self.extract_and_save(&tab).await?;
 
-            if new_url == current_url {
-                // URL 没有变化，尝试主动检测登录状态
-                eprintln!("[DouyinBrowser] No auto-redirect, checking login status by navigating to home...");
-
-                // 尝试导航到创作者中心首页
-                match tab.navigate_to("https://creator.douyin.com/creator-micro/home") {
-                    Ok(_) => {
-                        // 等待导航完成
-                        if let Ok(_) = tab.wait_until_navigated() {
-                            std::thread::sleep(std::time::Duration::from_secs(3));
-
-                            let final_url = tab.get_url();
-                            eprintln!("[DouyinBrowser] Final URL after navigation: {}", final_url);
-
-                            // 重新注入提示
-                            self.inject_tip_overlay();
-
-                            // 检查是否成功到达创作者中心
-                            if final_url.contains("creator.douyin.com/creator-micro") {
-                                eprintln!("[DouyinBrowser] Successfully navigated to creator-micro, user is logged in!");
-                                self.result.step = BrowserAuthStep::NavigatingToUpload;
-                                self.result.message = "检测到已登录，正在跳转到上传页面...".to_string();
-                                self.result.need_poll = true;
-                                return Ok(true);
-                            } else if final_url.contains("passport.douyin.com") || final_url.contains("login") {
-                                eprintln!("[DouyinBrowser] Redirected to login page, user is not logged in");
-                                self.result.step = BrowserAuthStep::WaitingForLogin;
-                                self.result.message = "请扫码登录，页面将自动跳转".to_string();
-                                self.result.need_poll = true;
-                                return Ok(true);
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[DouyinBrowser] Navigation failed: {}", e);
-                    }
-                }
-            }
+            return Ok(false);
         }
 
-        // 其他情况，继续等待登录
+        // 检查是否在创作者中心（其他页面）
+        if current_url.contains("creator.douyin.com/creator-micro") {
+            eprintln!("[DouyinBrowser] On creator center (other page), navigating to upload...");
+            self.result.step = BrowserAuthStep::NavigatingToUpload;
+            self.result.message = "正在跳转到上传页面...".to_string();
+            self.inject_tip_overlay(&tab, "正在跳转到上传页面...");
+
+            tab.navigate_to("https://creator.douyin.com/creator-micro/content/upload")
+                .ok();
+            tab.wait_until_navigated().ok();
+            std::thread::sleep(Duration::from_secs(2));
+
+            return Ok(true);
+        }
+
+        // 仍在登录页面
+        eprintln!("[DouyinBrowser] Still on login page, waiting for scan...");
         self.result.step = BrowserAuthStep::WaitingForLogin;
         self.result.message = "请扫码登录...".to_string();
-        self.result.need_poll = true;
         Ok(true)
     }
 
-
-    /// 提取 Cookie 和 LocalStorage
-    async fn extract_credentials(&mut self, tab: &headless_chrome::Tab) -> Result<(), String> {
-        eprintln!("[DouyinBrowser] Starting credential extraction...");
-
-        // API拦截器已经在导航前注入，这里只需要等待并读取数据
-        eprintln!("[DouyinBrowser] Waiting for API calls to complete...");
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        // 提取 Cookie
-        eprintln!("[DouyinBrowser] Extracting cookies...");
-        if let Ok(cookies) = tab.get_cookies() {
-            let cookie_parts: Vec<String> = cookies.iter()
-                .map(|c| format!("{}={}", c.name, c.value))
-                .collect();
-            self.result.cookie = cookie_parts.join("; ");
-            eprintln!("[DouyinBrowser] Extracted {} cookies", cookies.len());
-        } else {
-            eprintln!("[DouyinBrowser] Failed to get cookies");
+    /// 提取并保存数据
+    async fn extract_and_save(&mut self, tab: &Tab) -> Result<(), String> {
+        // 等待 API 数据
+        if !self.wait_for_api_data(tab, 2, 30u32) {
+            eprintln!("[DouyinBrowser] Warning: API data not fully received");
         }
 
-        // 提取 LocalStorage - 需要提取特定的 security-sdk 相关项
-        eprintln!("[DouyinBrowser] Extracting localStorage...");
-        let ls_keys = vec![
-            "security-sdk/s_sdk_cert_key",
-            "security-sdk/s_sdk_crypt_sdk",
-            "security-sdk/s_sdk_pri_key",
-            "security-sdk/s_sdk_pub_key",
-            "security-sdk/s_sdk_server_cert_key",
-            "security-sdk/s_sdk_sign_data_key/token",
-            "security-sdk/s_sdk_sign_data_key/web_protect",
-        ];
+        // 获取数据
+        let api_data = self.get_api_data(tab);
+        let (uid, nickname, avatar_url) = self.extract_user_info(&api_data);
+        let cookie = self.get_cookies(tab);
+        let local_storage_items = self.get_local_storage(tab);
 
-        let mut local_data = Vec::new();
-        for key in ls_keys {
-            let ls_script = format!(r#"
-                (function() {{
-                    try {{
-                        const value = localStorage.getItem('{}');
-                        if (value) {{
-                            return JSON.stringify({{
-                                key: '{}',
-                                value: value
-                            }});
-                        }}
-                        return null;
-                    }} catch (e) {{
-                        return null;
-                    }}
-                }})()
-            "#, key, key);
+        // 构建结果
+        let result_data = DouyinAuthResult {
+            third_id: uid.parse().unwrap_or(0),
+            third_param: ThirdParam {
+                cookie: cookie.clone(),
+                local_data: local_storage_items.clone(),
+                accept: "".to_string(),
+                referer: "".to_string(),
+                user_agent: "".to_string(),
+                sec_ch_ua: "".to_string(),
+                sec_fetch_dest: "".to_string(),
+                sec_fetch_mode: "".to_string(),
+                sec_fetch_site: "".to_string(),
+                accept_encoding: "".to_string(),
+                accept_language: "".to_string(),
+                sec_ch_ua_mobile: "".to_string(),
+                sec_ch_ua_platform: "".to_string(),
+                x_secsdk_csrf_token: "".to_string(),
+            },
+            third_return: api_data.user_info.clone().unwrap_or(serde_json::json!({})),
+            all_cookies: cookie.clone(),
+        };
 
-            if let Ok(ls_result) = tab.evaluate(&ls_script, true) {
-                if let Some(ls_value) = ls_result.value {
-                    if let Some(s) = ls_value.as_str() {
-                        if s != "null" && !s.is_empty() {
-                            local_data.push(s.to_string());
-                        }
-                    }
-                }
-            }
-        }
+        let params_json = serde_json::to_string(&result_data)
+            .map_err(|e| format!("序列化失败: {}", e))?;
 
-        // 将 local_data 数组转换为 JSON 字符串
-        let local_data_json = format!("[{}]", local_data.join(","));
-        self.result.local_storage = local_data_json;
-        eprintln!("[DouyinBrowser] LocalStorage extracted: {} items", local_data.len());
+        // 更新结果
+        self.result.cookie = cookie;
+        self.result.local_storage = serde_json::to_string(&local_storage_items)
+            .unwrap_or_default();
+        self.result.nickname = nickname.clone();
+        self.result.avatar_url = avatar_url;
+        self.result.step = BrowserAuthStep::Completed;
+        self.result.message = format!("授权完成！账号: {}", nickname);
+        self.result.need_poll = false;
 
-        // 从拦截的 API 数据中提取用户信息
-        eprintln!("[DouyinBrowser] Extracting user info from intercepted API...");
-        let api_data_script = r#"
-            (function() {
-                const data = window.__API_DATA__ || {};
-                console.log('[API] Checking intercepted data:', data);
-                return JSON.stringify(data);
-            })()
-        "#;
+        // 关闭浏览器
+        self.close_browser();
 
-        if let Ok(api_result) = tab.evaluate(api_data_script, true) {
-            if let Some(api_value) = api_result.value {
-                if let Some(s) = api_value.as_str() {
-                    eprintln!("[DouyinBrowser] API data string: {}", s);
-                    
-                    if let Ok(api_data) = serde_json::from_str::<serde_json::Value>(s) {
-                        eprintln!("[DouyinBrowser] API data parsed successfully");
-                        
-                        // 提取用户信息
-                        if let Some(user_info) = api_data.get("userInfo") {
-                            if !user_info.is_null() {
-                                eprintln!("[DouyinBrowser] Found userInfo in API data");
-                                
-                                if let Some(user) = user_info.get("user") {
-                                    eprintln!("[DouyinBrowser] Found user object");
-                                    
-                                    if let Some(nickname) = user.get("nickname").and_then(|v| v.as_str()) {
-                                        self.result.nickname = nickname.to_string();
-                                        eprintln!("[DouyinBrowser] ✓ Nickname from API: {}", nickname);
-                                    } else {
-                                        eprintln!("[DouyinBrowser] No nickname in user object");
-                                    }
-                                    
-                                    if let Some(avatar) = user.get("avatar_thumb")
-                                        .and_then(|v| v.get("url_list"))
-                                        .and_then(|v| v.get(0))
-                                        .and_then(|v| v.as_str()) {
-                                        self.result.avatar_url = avatar.to_string();
-                                        eprintln!("[DouyinBrowser] ✓ Avatar from API");
-                                    }
-                                } else {
-                                    eprintln!("[DouyinBrowser] No user object in userInfo");
-                                }
-                            } else {
-                                eprintln!("[DouyinBrowser] userInfo is null");
-                            }
-                        } else {
-                            eprintln!("[DouyinBrowser] No userInfo in API data");
-                        }
-                        
-                        // 也检查 accountInfo
-                        if let Some(account_info) = api_data.get("accountInfo") {
-                            if !account_info.is_null() {
-                                eprintln!("[DouyinBrowser] Found accountInfo in API data");
-                                
-                                // 如果userInfo没有昵称，尝试从accountInfo获取
-                                if self.result.nickname.is_empty() {
-                                    if let Some(nickname) = account_info.get("nickname").and_then(|v| v.as_str()) {
-                                        self.result.nickname = nickname.to_string();
-                                        eprintln!("[DouyinBrowser] ✓ Nickname from accountInfo: {}", nickname);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        eprintln!("[DouyinBrowser] Failed to parse API data JSON");
-                    }
-                } else {
-                    eprintln!("[DouyinBrowser] API data is not a string");
-                }
-            } else {
-                eprintln!("[DouyinBrowser] API result has no value");
-            }
-        } else {
-            eprintln!("[DouyinBrowser] Failed to evaluate API data script");
-        }
-
-        // 如果没有从API获取到昵称，尝试从页面元素中获取
-        if self.result.nickname.is_empty() {
-            eprintln!("[DouyinBrowser] Extracting user info from page...");
-            let user_info_script = r#"
-                (function() {
-                    try {
-                        // 尝试从页面中获取用户信息
-                        const avatarImg = document.querySelector('img[class*="avatar"]');
-                        const nicknameEl = document.querySelector('[class*="nickname"]') || 
-                                          document.querySelector('[class*="user-name"]');
-                        
-                        return JSON.stringify({
-                            nickname: nicknameEl ? nicknameEl.textContent.trim() : '',
-                            avatar: avatarImg ? avatarImg.src : ''
-                        });
-                    } catch (e) {
-                        return JSON.stringify({nickname: '', avatar: ''});
-                    }
-                })()
-            "#;
-
-            if let Ok(user_result) = tab.evaluate(user_info_script, true) {
-                if let Some(user_value) = user_result.value {
-                    if let Some(s) = user_value.as_str() {
-                        if let Ok(user_data) = serde_json::from_str::<serde_json::Value>(s) {
-                            if let Some(nickname) = user_data.get("nickname").and_then(|v| v.as_str()) {
-                                if !nickname.is_empty() {
-                                    self.result.nickname = nickname.to_string();
-                                    eprintln!("[DouyinBrowser] Nickname extracted from page: {}", nickname);
-                                }
-                            }
-                            if let Some(avatar) = user_data.get("avatar").and_then(|v| v.as_str()) {
-                                if !avatar.is_empty() && self.result.avatar_url.is_empty() {
-                                    self.result.avatar_url = avatar.to_string();
-                                    eprintln!("[DouyinBrowser] Avatar extracted from page");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if self.result.nickname.is_empty() {
-            self.result.nickname = "抖音用户".to_string();
-            eprintln!("[DouyinBrowser] Using default nickname");
-        }
-
-        eprintln!("[DouyinBrowser] Credential extraction completed");
         Ok(())
-    }
-
-    /// 关闭浏览器
-    async fn close_browser(&mut self) {
-        eprintln!("[DouyinBrowser] Closing browser...");
-
-        // 清除引用，Browser 的 drop 会关闭浏览器
-        self.tab = None;
-        self.browser = None;
-
-        eprintln!("[DouyinBrowser] Browser closed");
     }
 
     /// 取消授权
     pub async fn cancel(&mut self) {
-        self.close_browser().await;
+        self.close_browser();
         self.result.step = BrowserAuthStep::Idle;
         self.result.message = "已取消授权".to_string();
         self.result.need_poll = false;
@@ -977,17 +849,69 @@ impl DouyinBrowser {
     pub fn get_result(&self) -> &BrowserAuthResult {
         &self.result
     }
-
-    /// 获取授权结果（可修改）
-    pub fn get_result_mut(&mut self) -> &mut BrowserAuthResult {
-        &mut self.result
-    }
 }
 
 impl Default for DouyinBrowser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ============================================================================
+// 数据结构
+// ============================================================================
+
+/// LocalStorage 项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalStorageItem {
+    key: String,
+    value: String,
+}
+
+/// 抖音授权结果数据结构（参考 Python 版本）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DouyinAuthResult {
+    /// 用户 ID
+    third_id: u64,
+    /// 请求参数
+    third_param: ThirdParam,
+    /// 用户信息响应
+    third_return: serde_json::Value,
+    /// 所有 cookies
+    all_cookies: String,
+}
+
+/// 请求头参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ThirdParam {
+    #[serde(rename = "accept")]
+    accept: String,
+    #[serde(rename = "cookie")]
+    cookie: String,
+    #[serde(rename = "referer")]
+    referer: String,
+    #[serde(rename = "local_data")]
+    local_data: Vec<LocalStorageItem>,
+    #[serde(rename = "sec-ch-ua")]
+    sec_ch_ua: String,
+    #[serde(rename = "user-agent")]
+    user_agent: String,
+    #[serde(rename = "sec-fetch-dest")]
+    sec_fetch_dest: String,
+    #[serde(rename = "sec-fetch-mode")]
+    sec_fetch_mode: String,
+    #[serde(rename = "sec-fetch-site")]
+    sec_fetch_site: String,
+    #[serde(rename = "accept-encoding")]
+    accept_encoding: String,
+    #[serde(rename = "accept-language")]
+    accept_language: String,
+    #[serde(rename = "sec-ch-ua-mobile")]
+    sec_ch_ua_mobile: String,
+    #[serde(rename = "sec-ch-ua-platform")]
+    sec_ch_ua_platform: String,
+    #[serde(rename = "x-secsdk-csrf-token")]
+    x_secsdk_csrf_token: String,
 }
 
 // ============================================================================
