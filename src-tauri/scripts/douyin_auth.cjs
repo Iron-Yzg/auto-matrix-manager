@@ -50,11 +50,6 @@ async function main() {
             const url = event.request.url;
             const headers = event.request.headers || {};
 
-            // 调试日志：显示所有请求
-            if (url.includes('/web/api/') || url.includes('/account/api/')) {
-                console.log('[CDP DEBUG] Request: ' + url.substring(0, 100));
-            }
-
             // /web/api/media/user/info 的请求
             if (url.includes('/web/api/media/user/info')) {
                 console.log('[CDP] RequestWillBeSent: /web/api/media/user/info');

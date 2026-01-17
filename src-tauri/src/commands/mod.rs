@@ -347,14 +347,17 @@ pub async fn cancel_browser_auth(state: tauri::State<'_, AppState>) -> Result<()
 
 /// 保存从浏览器提取的凭证到数据库
 fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str) -> Result<UserAccount, String> {
+    // Node.js 输出的是数组格式: [{"key": "...", "value": "..."}, ...]
     let local_data_items: Vec<serde_json::Value> = if let Ok(items) = serde_json::from_str::<serde_json::Value>(&result.local_storage) {
-        if let Some(obj) = items.as_object() {
-            obj.iter()
-                .map(|(k, v)| {
-                    serde_json::json!({
-                        "key": k,
-                        "value": v.as_str().unwrap_or("")
-                    })
+        if let Some(arr) = items.as_array() {
+            arr.iter()
+                .filter_map(|item| {
+                    let key = item.get("key")?.as_str()?;
+                    let value = item.get("value")?.as_str()?;
+                    Some(serde_json::json!({
+                        "key": key,
+                        "value": value
+                    }))
                 })
                 .collect()
         } else {
@@ -363,6 +366,16 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
     } else {
         vec![]
     };
+
+    eprintln!("[Rust] local_data_items count: {}", local_data_items.len());
+    if local_data_items.is_empty() {
+        eprintln!("[Rust WARN] local_storage parsing failed or empty!");
+    } else {
+        eprintln!("[Rust] localStorage keys: {}", local_data_items.iter()
+            .filter_map(|item| item.get("key").and_then(|k| k.as_str()))
+            .collect::<Vec<_>>()
+            .join(", "));
+    }
 
     // 解析捕获的 request_headers
     let request_headers: serde_json::Value = serde_json::from_str(&result.request_headers)
@@ -381,10 +394,24 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // 如果 request_headers 中的 cookie 为空，使用浏览器 cookies 作为备选
+    let cookie_for_use = if !request_cookie.is_empty() {
+        request_cookie.to_string()
+    } else if !result.cookie.is_empty() {
+        eprintln!("[Rust] Using browser cookie as fallback (request_headers.cookie was empty)");
+        result.cookie.clone()
+    } else {
+        eprintln!("[Rust WARN] No cookie available!");
+        String::new()
+    };
+
+    eprintln!("[Rust] Cookie length: {}", cookie_for_use.len());
+    eprintln!("[Rust] Cookie preview: {}", &cookie_for_use[..std::cmp::min(100, cookie_for_use.len())]);
+
     // 从 request_headers 中提取 third_param（与 Python 逻辑完全一致）
     let third_param = serde_json::json!({
         "accept": request_headers.get("accept").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "cookie": request_cookie,
+        "cookie": cookie_for_use,
         "referer": "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
         "local_data": local_data_items,
         "sec-ch-ua": request_headers.get("sec-ch-ua").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
