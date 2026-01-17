@@ -56,9 +56,12 @@ pub struct BrowserAuthResult {
     pub local_storage: String,
     pub nickname: String,
     pub avatar_url: String,
+    pub uid: String,
+    pub sec_uid: String,
     pub error: Option<String>,
     pub screenshot: Option<String>,
     pub need_poll: bool,
+    pub request_headers: String, // JSON string of request headers for publishing
 }
 
 impl Default for BrowserAuthResult {
@@ -71,9 +74,12 @@ impl Default for BrowserAuthResult {
             local_storage: String::new(),
             nickname: String::new(),
             avatar_url: String::new(),
+            uid: String::new(),
+            sec_uid: String::new(),
             error: None,
             screenshot: None,
             need_poll: false,
+            request_headers: String::new(),
         }
     }
 }
@@ -114,8 +120,11 @@ impl BrowserAutomator {
                 self.result.local_storage = browser_result.local_storage.clone();
                 self.result.nickname = browser_result.nickname.clone();
                 self.result.avatar_url = browser_result.avatar_url.clone();
+                self.result.uid = browser_result.uid.clone();
+                self.result.sec_uid = browser_result.sec_uid.clone();
                 self.result.error = browser_result.error.clone();
                 self.result.need_poll = browser_result.need_poll;
+                self.result.request_headers = browser_result.request_headers.clone();
                 Ok(self.result.need_poll)
             }
             None => Ok(false),

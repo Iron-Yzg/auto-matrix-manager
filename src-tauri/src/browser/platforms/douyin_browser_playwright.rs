@@ -161,12 +161,9 @@ impl DouyinBrowserPlaywright {
 
         eprintln!("[DouyinBrowser-Playwright] Starting Playwright script...");
 
-        // 准备参数供阻塞线程使用
-        let timeout_secs = self.timeout_seconds;
-
         // 在阻塞线程中运行 Playwright 脚本
         let result = tokio::task::spawn_blocking(move || {
-            Self::run_script(timeout_secs)
+            Self::run_script()
         }).await;
 
         match result {
@@ -202,18 +199,37 @@ impl DouyinBrowserPlaywright {
         data_path.join("playwright")
     }
 
+    /// 读取 Node.js 脚本文件
+    fn read_script_file() -> Result<String, String> {
+        // 尝试从源码目录读取脚本
+        let source_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()
+            .unwrap_or(&std::path::PathBuf::from("."))
+            .to_path_buf();
+        let script_path = source_dir.join("scripts").join("douyin_auth.cjs");
+
+        eprintln!("[DouyinBrowser-Playwright] Looking for script at: {}", script_path.display());
+
+        if script_path.exists() {
+            std::fs::read_to_string(&script_path)
+                .map_err(|e| format!("读取脚本文件失败: {}", e))
+        } else {
+            Err(format!("脚本文件不存在: {}", script_path.display()))
+        }
+    }
+
     /// 在阻塞线程中运行 Playwright 脚本
-    fn run_script(timeout_secs: u32) -> Result<BrowserAuthResult, String> {
+    fn run_script() -> Result<BrowserAuthResult, String> {
         eprintln!("[DouyinBrowser-Playwright] Running Playwright script in blocking thread...");
+
+        // 从文件读取 Node.js 脚本
+        let script = Self::read_script_file()?;
+        eprintln!("[DouyinBrowser-Playwright] Script loaded from file, length: {}", script.len());
 
         // 获取 Playwright 目录（使用应用数据目录）
         let playwright_dir = Self::get_playwright_dir_static();
         let browsers_dir = playwright_dir.join("browsers");
 
         let output_path = std::env::temp_dir().join("douyin_auth_result.json");
-
-        // 创建临时 Node.js 脚本
-        let script = Self::create_node_script(timeout_secs);
 
         // 写入脚本到 Playwright 目录
         let script_path = playwright_dir.join("douyin_auth_script.js");
@@ -345,6 +361,20 @@ impl DouyinBrowserPlaywright {
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
 
+                result.uid = json.get("uid")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                result.sec_uid = json.get("sec_uid")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                result.request_headers = json.get("request_headers")
+                    .map(|h| h.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+
                 if result.step == BrowserAuthStep::Completed {
                     Ok(result)
                 } else {
@@ -353,320 +383,6 @@ impl DouyinBrowserPlaywright {
             }
             Err(e) => Err(format!("解析结果失败: {}", e))
         }
-    }
-
-    /// 创建 Node.js 脚本
-    fn create_node_script(_timeout_secs: u32) -> String {
-        format!(r#"
-const {{ chromium }} = require('playwright');
-const fs = require('fs');
-
-const OUTPUT_FILE = process.argv[2] || "";
-
-async function main() {{
-    console.log('=== Playwright Douyin Authenticator ===');
-    console.log('Output file:', OUTPUT_FILE);
-
-    let browser = null;
-
-    try {{
-        console.log('1. 准备启动浏览器...');
-
-        // 启动浏览器
-        console.log('2. 正在启动 chromium...');
-        browser = await chromium.launch({{
-            headless: false,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        }});
-        console.log('3. 浏览器启动成功');
-
-        const context = await browser.newContext({{
-            viewport: {{ width: 1280, height: 800 }},
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }});
-        console.log('4. Context 创建成功');
-
-        const page = await context.newPage();
-        console.log('5. Page 创建成功');
-
-        // 用于存储 API 响应的数据
-        const apiResponseData = {{}};
-
-        // 调试：记录所有响应（用于排查）
-        let responseCount = 0;
-        let requestCount = 0;
-
-        // 使用 page 级别的 response 监听器
-        console.log('[Info] Setting up page-level response listener...');
-
-        // 测试：打印一个简单的日志，确认脚本在运行
-        console.log('[测试] 这条消息应该立即显示');
-
-        page.on('response', async (response) => {{
-            const url = response.url();
-            const status = response.status();
-            responseCount++;
-
-            // 打印所有响应URL
-            console.log('[响应#' + responseCount + '] ' + status + ' ' + url);
-
-            // 检查是否是目标 API
-            if (url.includes('/web/api/media/user/info') || url.includes('/account/api/v1/user/account/info')) {{
-                console.log('*** 命中目标API ***', status, url);
-
-                try {{
-                    const body = await response.text();
-                    console.log('[Response Body]', body.substring(0, 300));
-
-                    // 保存响应数据
-                    apiResponseData[url] = {{
-                        body: body,
-                        status: status
-                    }};
-                }} catch (e) {{
-                    console.log('[Error] Failed to get response body:', e.message);
-                }}
-            }}
-        }});
-
-        page.on('request', (request) => {{
-            const url = request.url();
-            requestCount++;
-
-            // 打印所有请求URL
-            if (requestCount <= 50) {{
-                console.log('[请求#' + requestCount + '] ' + request.method() + ' ' + url);
-            }}
-        }});
-
-        console.log('[Info] Listeners registered, starting navigation...');
-
-        // Step 1: 导航到创作者中心
-        console.log('========================================');
-        console.log('Step 1: Navigating to https://creator.douyin.com/...');
-        await page.goto('https://creator.douyin.com/', {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
-        console.log('[Nav] Page loaded:', page.url());
-        console.log('[统计] 总响应数:', responseCount, '总请求数:', requestCount);
-        console.log('========================================');
-
-        // Step 2: 显示提示浮层
-        console.log('Step 2: Showing tip overlay...');
-        await page.evaluate(() => {{
-            const existing = document.getElementById('amm-tip-overlay');
-            if (existing) existing.remove();
-
-            const tip = document.createElement('div');
-            tip.id = 'amm-tip-overlay';
-            tip.innerHTML = `
-                <div style="
-                    position: fixed;
-                    top: 20px;
-                    left: 50%;
-                    transform: translateX(-50%);
-                    background: linear-gradient(135deg, #ff9500 0%, #ff6b00 100%);
-                    color: white;
-                    padding: 16px 24px;
-                    border-radius: 12px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    box-shadow: 0 10px 40px rgba(255, 149, 0, 0.4);
-                    z-index: 99999999;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                ">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                    </svg>
-                    <span>请使用抖音App扫码登录，登录成功后页面将自动跳转</span>
-                </div>
-            `;
-            document.body.insertBefore(tip, document.body.firstChild);
-        }});
-
-        // Step 3: 无限等待用户扫码登录
-        console.log('Step 3: Waiting for QR code login (no timeout)...');
-        console.log('[Info] Please scan the QR code with Douyin app');
-
-        // 使用 waitForURL 等待 URL 匹配模式
-        try {{
-            await page.waitForURL('**/creator-micro/**', {{ timeout: 0 }});
-            console.log('[OK] Login detected! URL:', page.url());
-        }} catch (e) {{
-            console.log('[Timeout] Waiting for login redirect...');
-            throw e;
-        }}
-
-        // Step 4: 等待页面完全加载
-        console.log('Step 4: Waiting for full page load...');
-        await page.waitForLoadState('networkidle');
-        console.log('[OK] Network idle');
-        console.log('[调试] 登录后总响应数:', responseCount);
-
-        // 打印所有捕获的响应（调试）
-        console.log('[调试] 所有响应URL:');
-        for (const r of allResponses) {{
-            console.log('  -', r.status, r.url);
-        }}
-
-        // 移除提示浮层
-        await page.evaluate(() => {{
-            const tip = document.getElementById('amm-tip-overlay');
-            if (tip) tip.remove();
-        }});
-
-        // Step 5: 从监听的响应中提取用户信息
-        console.log('Step 5: Extracting user info from responses...');
-        console.log('[Info] Captured API URLs:', Object.keys(apiResponseData));
-
-        let nickname = '抖音用户';
-        let avatar_url = '';
-
-        // 解析捕获的响应
-        for (const [url, data] of Object.entries(apiResponseData)) {{
-            try {{
-                const parsed = JSON.parse(data.body);
-                console.log('[Info] Parsed response from:', url);
-
-                if (url.includes('/web/api/media/user/info')) {{
-                    if (parsed?.user) {{
-                        nickname = parsed.user.nickname || nickname;
-                        if (parsed.user.avatar_thumb?.url_list?.[0]) {{
-                            avatar_url = parsed.user.avatar_thumb.url_list[0];
-                        }} else if (parsed.user.avatar_url) {{
-                            avatar_url = parsed.user.avatar_url;
-                        }}
-                        console.log('[Info] Extracted nickname from userInfo:', nickname);
-                    }}
-                }}
-
-                if (url.includes('/account/api/v1/user/account/info')) {{
-                    if (parsed?.data?.user_info) {{
-                        const user = parsed.data.user_info;
-                        if (nickname === '抖音用户') {{
-                            nickname = user.display_name || user.nickname || user.name || nickname;
-                        }}
-                        if (!avatar_url && user.avatar_url) {{
-                            avatar_url = user.avatar_url;
-                        }}
-                        console.log('[Info] Extracted nickname from accountInfo:', nickname);
-                    }}
-                }}
-            }} catch (e) {{
-                console.log('[Error] Failed to parse response:', e.message, 'URL:', url);
-            }}
-        }}
-
-        // 备用方案: 从页面全局变量中提取（仅用于头像昵称，不调用API）
-        // 注意：用户要求只从API监听获取，这里仅作为头像的备用来源
-        if (nickname === '抖音用户') {{
-            console.log('[备用] API未监听到用户信息，尝试从页面变量获取...');
-            const pageData = await page.evaluate(() => {{
-                // 尝试 __INITIAL_DATA__
-                if (window.__INITIAL_DATA__) {{
-                    try {{
-                        const data = typeof window.__INITIAL_DATA__ === 'string'
-                            ? JSON.parse(window.__INITIAL_DATA__)
-                            : window.__INITIAL_DATA__;
-                        if (data.user || data.userInfo || data.currentUser) {{
-                            const user = data.user || data.userInfo || data.currentUser;
-                            return {{ nickname: user.nickname, avatar_url: user.avatar || user.avatarUrl || user.avatar_thumb?.url_list?.[0] }};
-                        }}
-                    }} catch (e) {{}}
-                }}
-                return null;
-            }});
-
-            if (pageData && pageData.nickname) {{
-                nickname = pageData.nickname;
-                console.log('[备用] 从页面获取到nickname:', nickname);
-            }}
-            if (pageData && pageData.avatar_url) {{
-                avatar_url = pageData.avatar_url;
-                console.log('[备用] 从页面获取到avatar_url');
-            }}
-        }}
-
-        // Step 6: 提取凭证数据
-        console.log('Step 6: Extracting credentials...');
-
-        const cookies = await page.context().cookies();
-        console.log('[Data] Cookies captured:', cookies.length);
-
-        const localStorageScript = await page.evaluate(() => {{
-            const items = {{}};
-            const keys = [
-                'security-sdk/s_sdk_cert_key',
-                'security-sdk/s_sdk_crypt_sdk',
-                'security-sdk/s_sdk_pri_key',
-                'security-sdk/s_sdk_pub_key',
-                'security-sdk/s_sdk_server_cert_key',
-                'sec_user_id',
-                'sessionid'
-            ];
-            for (const key of keys) {{
-                const value = localStorage.getItem(key);
-                if (value) items[key] = value;
-            }}
-            return items;
-        }});
-        console.log('[Data] localStorage keys:', Object.keys(localStorageScript));
-
-        // 从 localStorage 提取 sec_user_id
-        if (localStorageScript['sec_user_id']) {{
-            console.log('[Data] Found sec_user_id:', localStorageScript['sec_user_id']);
-        }}
-
-        // 构建结果
-        const third_id = '';
-        const sec_uid = localStorageScript['sec_user_id'] || '';
-
-        console.log('[结果] nickname来源:', nickname === '抖音用户' ? '备用方案(页面变量)' : 'API监听器');
-        console.log('[结果] avatar_url来源:', !avatar_url ? '无' : (apiResponseData[Object.keys(apiResponseData).find(u => u.includes('/web/api/media/user/info'))] ? 'API监听器' : '备用方案(页面变量)'));
-
-        console.log('[Data] Building params - third_id:', third_id, 'sec_uid:', sec_uid);
-
-        const result = {{
-            step: 'completed',
-            message: '授权成功！账号: ' + nickname,
-            url: page.url(),
-            nickname: nickname,
-            avatar_url: avatar_url,
-            cookie: cookies.map(c => c.name + '=' + c.value).join('; '),
-            local_storage: JSON.stringify(Object.entries(localStorageScript).map(([key, value]) => ({{ key, value }}))),
-            third_id: third_id,
-            sec_uid: sec_uid,
-            need_poll: false
-        }};
-
-        fs.writeFileSync(OUTPUT_FILE, JSON.stringify(result, null, 2));
-        console.log('[OK] Result saved to:', OUTPUT_FILE);
-        console.log('[OK] Authorization completed! Nickname:', nickname);
-
-    }} catch (error) {{
-        console.error('[Error]', error.message);
-        const result = {{
-            step: 'failed',
-            message: error.message || '操作被取消',
-            need_poll: false
-        }};
-        fs.writeFileSync(OUTPUT_FILE, JSON.stringify(result, null, 2));
-        console.log('[Error] Result saved to:', OUTPUT_FILE);
-    }} finally {{
-        if (browser) {{
-            await browser.close();
-            console.log('Browser closed');
-        }}
-    }}
-}}
-
-main().catch(error => {{
-    console.error('Fatal error:', error);
-    process.exit(1);
-}});
-"#
-        )
     }
 
     /// 检查登录状态（轮询模式）

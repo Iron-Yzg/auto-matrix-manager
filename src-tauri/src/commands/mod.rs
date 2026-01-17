@@ -364,16 +364,48 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
         vec![]
     };
 
-    // 提取关键字段（平台特定）
-    let (third_id, sec_uid) = extract_credentials_for_platform(platform, &result.cookie, &result.local_storage);
+    // 解析捕获的 request_headers
+    let request_headers: serde_json::Value = serde_json::from_str(&result.request_headers)
+        .unwrap_or(serde_json::json!({}));
 
-    // 构建params JSON
+    eprintln!("[Rust] result.request_headers: {}", result.request_headers);
+    eprintln!("[Rust] parsed request_headers: {}", request_headers);
+
+    // 检查 request_headers 是否为空
+    if result.request_headers.is_empty() || result.request_headers == "{}" {
+        eprintln!("[Rust WARN] request_headers is empty! No API request was captured.");
+    }
+
+    // 从 request_headers 中获取 cookie（与 Python 逻辑一致）
+    let request_cookie = request_headers.get("cookie")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // 从 request_headers 中提取 third_param（与 Python 逻辑完全一致）
+    let third_param = serde_json::json!({
+        "accept": request_headers.get("accept").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "cookie": request_cookie,
+        "referer": "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        "local_data": local_data_items,
+        "sec-ch-ua": request_headers.get("sec-ch-ua").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "user-agent": request_headers.get("user-agent").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "sec-fetch-dest": request_headers.get("sec-fetch-dest").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "sec-fetch-mode": request_headers.get("sec-fetch-mode").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "sec-fetch-site": request_headers.get("sec-fetch-site").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "accept-encoding": request_headers.get("accept-encoding").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "accept-language": request_headers.get("accept-language").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "sec-ch-ua-mobile": request_headers.get("sec-ch-ua-mobile").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "sec-ch-ua-platform": request_headers.get("sec-ch-ua-platform").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
+        "x-secsdk-csrf-token": request_headers.get("x-secsdk-csrf-token").unwrap_or(&serde_json::json!("")).as_str().unwrap_or("")
+    });
+
+    // third_id 直接从 API 响应的 uid 获取（与 Python 逻辑一致）
+    let third_id = result.uid.clone();
+
+    // 构建 params JSON - 与 dy_account.json 结构一致，只保留 third_id 和 third_param
     let params = serde_json::json!({
-        "cookie": result.cookie,
-        "user_agent": "", // Headless browser doesn't expose user agent
         "third_id": third_id,
-        "sec_uid": sec_uid,
-        "local_data": local_data_items
+        "third_param": third_param
     });
 
     // 构建账号
@@ -409,29 +441,6 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
     Ok(account)
 }
 
-/// 根据平台提取凭证信息
-fn extract_credentials_for_platform(platform: &str, cookie: &str, local_storage: &str) -> (String, String) {
-    match platform {
-        "douyin" => (
-            extract_from_cookies(cookie, "tt_webid"),
-            extract_sec_uid(local_storage),
-        ),
-        "xiaohongshu" => (
-            extract_from_cookies(cookie, "web_session"),
-            extract_sec_uid(local_storage),
-        ),
-        "kuaishou" => (
-            extract_from_cookies(cookie, "kuaishou_id"),
-            extract_sec_uid(local_storage),
-        ),
-        "bilibili" => (
-            extract_from_cookies(cookie, "SESSDATA"),
-            extract_sec_uid(local_storage),
-        ),
-        _ => (String::new(), String::new()),
-    }
-}
-
 /// 获取平台名称
 fn get_platform_name(platform: &str) -> &'static str {
     match platform {
@@ -441,30 +450,4 @@ fn get_platform_name(platform: &str) -> &'static str {
         "bilibili" => "B站",
         _ => "未知",
     }
-}
-
-/// 从Cookie字符串中提取指定名称的值
-fn extract_from_cookies(cookies: &str, name: &str) -> String {
-    for cookie in cookies.split(';') {
-        let cookie = cookie.trim();
-        if cookie.starts_with(&format!("{}=", name)) {
-            if let Some(value) = cookie.split('=').nth(1) {
-                return value.to_string();
-            }
-        }
-    }
-    String::new()
-}
-
-/// 从localStorage中提取sec_uid
-fn extract_sec_uid(local_storage: &str) -> String {
-    if let Ok(items) = serde_json::from_str::<serde_json::Value>(local_storage) {
-        if let Some(value) = items.get("sec_user_id") {
-            return value.as_str().unwrap_or("").to_string();
-        }
-        if let Some(value) = items.get("sec_uid") {
-            return value.as_str().unwrap_or("").to_string();
-        }
-    }
-    String::new()
 }
