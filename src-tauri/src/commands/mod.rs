@@ -226,15 +226,12 @@ pub struct BrowserAuthStatusResult {
 
 /// 启动浏览器授权流程
 #[tauri::command]
-pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppState>, platform: &str, chrome_path: Option<&str>) -> Result<BrowserAuthStatusResult, String> {
-    eprintln!("[Command] start_browser_auth called for platform: {} with chrome_path: {:?}", platform, chrome_path);
+pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppState>, platform: &str, _chrome_path: Option<&str>) -> Result<BrowserAuthStatusResult, String> {
+    eprintln!("[Command] start_browser_auth called for platform: {}", platform);
     let mut automator = state.browser_automator.lock().await;
 
-    // 转换路径
-    let path = chrome_path.map(|p| std::path::PathBuf::from(p));
-
-    // 启动浏览器
-    automator.start_with_chrome_path(platform, path)
+    // 使用 Playwright 版本启动抖音授权
+    automator.start_douyin()
         .await
         .map_err(|e| format!("启动浏览器失败: {}", e))?;
 
@@ -305,11 +302,10 @@ pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, A
         .map_err(|e| format!("检查状态失败: {}", e))?;
 
     let result = automator.get_result().clone();
-    let platform = automator.get_platform_id();
 
     // 如果已完成，保存凭证到数据库
     if !need_poll && !result.cookie.is_empty() {
-        let account = save_browser_credentials(&app, &result, platform)
+        let account = save_browser_credentials(&app, &result, "douyin")
             .map_err(|e| format!("保存凭证失败: {}", e))?;
 
         // 返回完成的账号信息

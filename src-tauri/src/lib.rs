@@ -7,7 +7,7 @@ pub mod platforms;
 pub mod commands;
 
 // Re-export browser types for easy access
-pub use browser::{BrowserAutomator, BrowserAuthResult, BrowserAuthStep, BrowserFactory, PlatformBrowser};
+pub use browser::{BrowserAutomator, BrowserAuthResult, BrowserAuthStep};
 
 // Re-export commands for easy access
 // 重新导出命令以便轻松访问
