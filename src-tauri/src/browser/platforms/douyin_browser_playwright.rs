@@ -3,6 +3,7 @@
 // 通过 CDP (Chrome DevTools Protocol) 实现
 
 use crate::browser::{BrowserAuthResult, BrowserAuthStep};
+use std::io::BufRead;
 use std::path::PathBuf;
 
 /// 抖音浏览器实现（Playwright 版本）
@@ -227,44 +228,66 @@ impl DouyinBrowserPlaywright {
         eprintln!("[DouyinBrowser-Playwright] Output path: {}", output_path.display());
         eprintln!("[DouyinBrowser-Playwright] Browsers path: {}", browsers_dir.display());
 
-        // 执行脚本
+        // 执行脚本 - 使用流式输出以便实时看到日志
         let start = std::time::Instant::now();
-        let output = std::process::Command::new("node")
+        let mut child = std::process::Command::new("node")
             .arg(&script_path)
             .arg(output_path.to_string_lossy().as_ref())
             .env("PLAYWRIGHT_BROWSERS_PATH", browsers_dir.to_string_lossy().as_ref())
             .current_dir(&playwright_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .output();
+            .spawn()
+            .map_err(|e| format!("无法启动脚本: {}", e))?;
 
-        match output {
-            Ok(output) => {
-                let elapsed = start.elapsed();
-                eprintln!("[DouyinBrowser-Playwright] Script completed in {:.1}s", elapsed.as_secs_f64());
+        // 实时读取 stdout 和 stderr
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
 
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.is_empty() {
-                    eprintln!("[DouyinBrowser-Playwright] stderr:\n{}", stderr);
-                }
-
-                if output.status.success() {
-                    if output_path.exists() {
-                        match std::fs::read_to_string(&output_path) {
-                            Ok(content) => {
-                                eprintln!("[DouyinBrowser-Playwright] Result content: {}", content);
-                                Self::parse_result(&content)
-                            }
-                            Err(e) => Err(format!("读取结果文件失败: {}", e))
-                        }
-                    } else {
-                        Err("未找到结果文件".to_string())
-                    }
-                } else {
-                    Err(format!("脚本执行失败: {}", stderr))
+        // 使用线程同时读取 stdout 和 stderr
+        let stdout_handle = std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    eprintln!("[DouyinBrowser-Playwright] {}", line);
                 }
             }
-            Err(e) => Err(format!("无法执行脚本: {}", e))
+        });
+
+        let stderr_handle = std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    eprintln!("[DouyinBrowser-Playwright stderr] {}", line);
+                }
+            }
+        });
+
+        // 等待进程结束
+        let status = child.wait()
+            .map_err(|e| format!("等待脚本结束失败: {}", e))?;
+
+        // 等待线程完成
+        stdout_handle.join().ok();
+        stderr_handle.join().ok();
+
+        let elapsed = start.elapsed();
+        eprintln!("[DouyinBrowser-Playwright] Script completed in {:.1}s", elapsed.as_secs_f64());
+
+        if status.success() {
+            if output_path.exists() {
+                match std::fs::read_to_string(&output_path) {
+                    Ok(content) => {
+                        eprintln!("[DouyinBrowser-Playwright] Result content: {}", content);
+                        Self::parse_result(&content)
+                    }
+                    Err(e) => Err(format!("读取结果文件失败: {}", e))
+                }
+            } else {
+                Err("未找到结果文件".to_string())
+            }
+        } else {
+            Err("脚本执行失败".to_string())
         }
     }
 
@@ -347,24 +370,84 @@ async function main() {{
     let browser = null;
 
     try {{
+        console.log('1. 准备启动浏览器...');
+
         // 启动浏览器
-        console.log('Launching browser...');
+        console.log('2. 正在启动 chromium...');
         browser = await chromium.launch({{
             headless: false,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         }});
+        console.log('3. 浏览器启动成功');
 
         const context = await browser.newContext({{
             viewport: {{ width: 1280, height: 800 }},
             userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }});
+        console.log('4. Context 创建成功');
 
         const page = await context.newPage();
+        console.log('5. Page 创建成功');
+
+        // 用于存储 API 响应的数据
+        const apiResponseData = {{}};
+
+        // 调试：记录所有响应（用于排查）
+        let responseCount = 0;
+        let requestCount = 0;
+
+        // 使用 page 级别的 response 监听器
+        console.log('[Info] Setting up page-level response listener...');
+
+        // 测试：打印一个简单的日志，确认脚本在运行
+        console.log('[测试] 这条消息应该立即显示');
+
+        page.on('response', async (response) => {{
+            const url = response.url();
+            const status = response.status();
+            responseCount++;
+
+            // 打印所有响应URL
+            console.log('[响应#' + responseCount + '] ' + status + ' ' + url);
+
+            // 检查是否是目标 API
+            if (url.includes('/web/api/media/user/info') || url.includes('/account/api/v1/user/account/info')) {{
+                console.log('*** 命中目标API ***', status, url);
+
+                try {{
+                    const body = await response.text();
+                    console.log('[Response Body]', body.substring(0, 300));
+
+                    // 保存响应数据
+                    apiResponseData[url] = {{
+                        body: body,
+                        status: status
+                    }};
+                }} catch (e) {{
+                    console.log('[Error] Failed to get response body:', e.message);
+                }}
+            }}
+        }});
+
+        page.on('request', (request) => {{
+            const url = request.url();
+            requestCount++;
+
+            // 打印所有请求URL
+            if (requestCount <= 50) {{
+                console.log('[请求#' + requestCount + '] ' + request.method() + ' ' + url);
+            }}
+        }});
+
+        console.log('[Info] Listeners registered, starting navigation...');
 
         // Step 1: 导航到创作者中心
+        console.log('========================================');
         console.log('Step 1: Navigating to https://creator.douyin.com/...');
         await page.goto('https://creator.douyin.com/', {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
         console.log('[Nav] Page loaded:', page.url());
+        console.log('[统计] 总响应数:', responseCount, '总请求数:', requestCount);
+        console.log('========================================');
 
         // Step 2: 显示提示浮层
         console.log('Step 2: Showing tip overlay...');
@@ -402,35 +485,8 @@ async function main() {{
             document.body.insertBefore(tip, document.body.firstChild);
         }});
 
-        // Step 3: 设置 CDP 监听器（在等待登录之前设置）
-        console.log('Step 3: Setting up CDP listeners before waiting for login...');
-        const cdpSession = await page.context().newCDPSession(page);
-        await cdpSession.send('Network.enable');
-
-        const apiResponses = {{}};
-
-        cdpSession.on('Network.responseReceived', (params) => {{
-            const url = params.response.url;
-            const status = params.response.status;
-            if (url.includes('/web/api/media/user/info') || url.includes('/account/api/v1/user/account/info')) {{
-                console.log('[CDP Response]', status, url);
-                apiResponses[url] = {{
-                    requestId: params.requestId,
-                    status: status,
-                    url: url
-                }};
-            }}
-        }});
-
-        cdpSession.on('Network.requestWillBeSent', (params) => {{
-            const url = params.request.url;
-            if (url.includes('/web/api/media/user/info') || url.includes('/account/api/v1/user/account/info')) {{
-                console.log('[CDP Request]', params.request.method, url);
-            }}
-        }});
-
-        // Step 4: 无限等待用户扫码登录
-        console.log('Step 4: Waiting for QR code login (no timeout)...');
+        // Step 3: 无限等待用户扫码登录
+        console.log('Step 3: Waiting for QR code login (no timeout)...');
         console.log('[Info] Please scan the QR code with Douyin app');
 
         // 使用 waitForURL 等待 URL 匹配模式
@@ -442,16 +498,17 @@ async function main() {{
             throw e;
         }}
 
-        // 登录成功后，等待页面加载和 API 调用
-        console.log('[CDP] Waiting for page load...');
-        await page.waitForLoadState('load');
-        console.log('[CDP] Page loaded');
+        // Step 4: 等待页面完全加载
+        console.log('Step 4: Waiting for full page load...');
+        await page.waitForLoadState('networkidle');
+        console.log('[OK] Network idle');
+        console.log('[调试] 登录后总响应数:', responseCount);
 
-        // 等待 API 调用完成
-        await page.waitForTimeout(3000);
-        console.log('[CDP] Waited for API calls');
-
-        console.log('[CDP] Captured API responses:', Object.keys(apiResponses));
+        // 打印所有捕获的响应（调试）
+        console.log('[调试] 所有响应URL:');
+        for (const r of allResponses) {{
+            console.log('  -', r.status, r.url);
+        }}
 
         // 移除提示浮层
         await page.evaluate(() => {{
@@ -459,63 +516,52 @@ async function main() {{
             if (tip) tip.remove();
         }});
 
-        // Step 5: 从 CDP 监听的响应中提取用户信息
-        console.log('Step 5: Extracting user info from CDP responses...');
+        // Step 5: 从监听的响应中提取用户信息
+        console.log('Step 5: Extracting user info from responses...');
+        console.log('[Info] Captured API URLs:', Object.keys(apiResponseData));
 
-        console.log('[CDP] Captured API responses:', Object.keys(apiResponses));
-        console.log('[CDP] apiResponses count:', Object.keys(apiResponses).length);
-
-        // 使用 CDP 获取响应体
         let nickname = '抖音用户';
         let avatar_url = '';
 
-        for (const [url, info] of Object.entries(apiResponses)) {{
-            console.log('[CDP] Processing URL:', url, 'requestId:', info.requestId);
+        // 解析捕获的响应
+        for (const [url, data] of Object.entries(apiResponseData)) {{
             try {{
-                // 使用 CDP 获取响应体
-                const bodyResult = await cdpSession.send('Network.getResponseBody', {{
-                    requestId: info.requestId
-                }});
+                const parsed = JSON.parse(data.body);
+                console.log('[Info] Parsed response from:', url);
 
-                console.log('[CDP] getResponseBody success, base64Encoded:', bodyResult.base64Encoded);
-
-                let body = bodyResult.body;
-                // 如果是 base64 编码的，解码
-                if (bodyResult.base64Encoded) {{
-                    body = Buffer.from(body, 'base64').toString('utf-8');
+                if (url.includes('/web/api/media/user/info')) {{
+                    if (parsed?.user) {{
+                        nickname = parsed.user.nickname || nickname;
+                        if (parsed.user.avatar_thumb?.url_list?.[0]) {{
+                            avatar_url = parsed.user.avatar_thumb.url_list[0];
+                        }} else if (parsed.user.avatar_url) {{
+                            avatar_url = parsed.user.avatar_url;
+                        }}
+                        console.log('[Info] Extracted nickname from userInfo:', nickname);
+                    }}
                 }}
 
-                const data = JSON.parse(body);
-                console.log('[CDP] Response data:', JSON.stringify(data).substring(0, 300));
-
-                if (url.includes('/web/api/media/user/info') && data?.user) {{
-                    nickname = data.user.nickname || nickname;
-                    if (data.user.avatar_thumb?.url_list?.[0]) {{
-                        avatar_url = data.user.avatar_thumb.url_list[0];
-                    }} else if (data.user.avatar_url) {{
-                        avatar_url = data.user.avatar_url;
+                if (url.includes('/account/api/v1/user/account/info')) {{
+                    if (parsed?.data?.user_info) {{
+                        const user = parsed.data.user_info;
+                        if (nickname === '抖音用户') {{
+                            nickname = user.display_name || user.nickname || user.name || nickname;
+                        }}
+                        if (!avatar_url && user.avatar_url) {{
+                            avatar_url = user.avatar_url;
+                        }}
+                        console.log('[Info] Extracted nickname from accountInfo:', nickname);
                     }}
-                    console.log('[CDP] Extracted from userInfo:', nickname);
-                }}
-
-                if (url.includes('/account/api/v1/user/account/info') && data?.data?.user_info) {{
-                    const user = data.data.user_info;
-                    if (nickname === '抖音用户') {{
-                        nickname = user.display_name || user.nickname || user.name || nickname;
-                    }}
-                    if (!avatar_url && user.avatar_url) {{
-                        avatar_url = user.avatar_url;
-                    }}
-                    console.log('[CDP] Extracted from accountInfo:', nickname);
                 }}
             }} catch (e) {{
-                console.log('[CDP] Failed to get response body:', e.message, 'for URL:', url);
+                console.log('[Error] Failed to parse response:', e.message, 'URL:', url);
             }}
         }}
 
-        // 方式2: 从页面全局变量中提取（备用）
+        // 备用方案: 从页面全局变量中提取（仅用于头像昵称，不调用API）
+        // 注意：用户要求只从API监听获取，这里仅作为头像的备用来源
         if (nickname === '抖音用户') {{
-            console.log('[API] Trying window variables...');
+            console.log('[备用] API未监听到用户信息，尝试从页面变量获取...');
             const pageData = await page.evaluate(() => {{
                 // 尝试 __INITIAL_DATA__
                 if (window.__INITIAL_DATA__) {{
@@ -529,25 +575,16 @@ async function main() {{
                         }}
                     }} catch (e) {{}}
                 }}
-                // 尝试从 localStorage 中提取 sec_user_id
-                const secUserId = localStorage.getItem('sec_user_id');
-                if (secUserId) {{
-                    return {{ sec_user_id: secUserId }};
-                }}
                 return null;
             }});
 
-            if (pageData) {{
-                if (pageData.nickname) {{
-                    nickname = pageData.nickname;
-                    console.log('[API] Extracted from window:', nickname);
-                }}
-                if (pageData.avatar_url) {{
-                    avatar_url = pageData.avatar_url;
-                }}
-                if (pageData.sec_user_id) {{
-                    console.log('[API] Found sec_user_id:', pageData.sec_user_id);
-                }}
+            if (pageData && pageData.nickname) {{
+                nickname = pageData.nickname;
+                console.log('[备用] 从页面获取到nickname:', nickname);
+            }}
+            if (pageData && pageData.avatar_url) {{
+                avatar_url = pageData.avatar_url;
+                console.log('[备用] 从页面获取到avatar_url');
             }}
         }}
 
@@ -584,6 +621,9 @@ async function main() {{
         // 构建结果
         const third_id = '';
         const sec_uid = localStorageScript['sec_user_id'] || '';
+
+        console.log('[结果] nickname来源:', nickname === '抖音用户' ? '备用方案(页面变量)' : 'API监听器');
+        console.log('[结果] avatar_url来源:', !avatar_url ? '无' : (apiResponseData[Object.keys(apiResponseData).find(u => u.includes('/web/api/media/user/info'))] ? 'API监听器' : '备用方案(页面变量)'));
 
         console.log('[Data] Building params - third_id:', third_id, 'sec_uid:', sec_uid);
 
