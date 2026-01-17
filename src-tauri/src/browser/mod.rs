@@ -49,6 +49,7 @@ pub enum BrowserAuthStep {
     WaitingForLogin,
     LoginDetected,
     NavigatingToUpload,
+    WaitingForUpload,
     ExtractingCredentials,
     ClosingBrowser,
     Completed,
@@ -64,6 +65,7 @@ impl fmt::Display for BrowserAuthStep {
             BrowserAuthStep::WaitingForLogin => write!(f, "WaitingForLogin"),
             BrowserAuthStep::LoginDetected => write!(f, "LoginDetected"),
             BrowserAuthStep::NavigatingToUpload => write!(f, "NavigatingToUpload"),
+            BrowserAuthStep::WaitingForUpload => write!(f, "WaitingForUpload"),
             BrowserAuthStep::ExtractingCredentials => write!(f, "ExtractingCredentials"),
             BrowserAuthStep::ClosingBrowser => write!(f, "ClosingBrowser"),
             BrowserAuthStep::Completed => write!(f, "Completed"),
@@ -146,13 +148,14 @@ impl BrowserAutomator {
 
         match platform {
             "douyin" => {
+                // 使用 headless_chrome 实现（更稳定）
                 let mut douyin_browser = match chrome_path {
                     Some(path) => DouyinBrowser::with_chrome_path(path),
                     None => DouyinBrowser::new(),
                 };
                 let result = douyin_browser.start_authorize().await?;
                 self.browser = Some(BrowserWrapper::Douyin(douyin_browser));
-                self.result = result; // 直接使用，因为已经是统一类型
+                self.result = result;
             }
             _ => return Err(format!("不支持的平台: {}", platform)),
         }

@@ -27,26 +27,40 @@ pub fn run() {
     use crate::platforms::douyin::DouyinPlatform;
     use crate::commands::AppState;
     use crate::browser::BrowserAutomator;
-
-    let base_path = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let data_path = base_path.join("data");
-
-    // Create data directory if needed
-    std::fs::create_dir_all(&data_path).ok();
-
-    let db_manager = Arc::new(DatabaseManager::new(data_path.clone()));
-    let douyin_platform = Arc::new(DouyinPlatform::with_storage((*db_manager).clone()));
-    let browser_automator = Arc::new(Mutex::new(BrowserAutomator::new()));
-    let app_state = AppState {
-        db_manager,
-        douyin_platform,
-        browser_automator,
-    };
+    use tauri::Manager;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(app_state)
+        .setup(|app| {
+            // 使用 Tauri 的应用数据目录
+            let data_path = app.path()
+                .app_data_dir()
+                .unwrap_or_else(|_| {
+                    // 如果获取失败，使用默认路径
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    std::path::PathBuf::from(home)
+                        .join("Library")
+                        .join("Application Support")
+                        .join("com.tauri.auto-matrix-manager")
+                });
+
+            // Create data directory if needed
+            std::fs::create_dir_all(&data_path).ok();
+            
+            eprintln!("[App] Database path: {:?}", data_path.join("matrix.db"));
+
+            let db_manager = Arc::new(DatabaseManager::new(data_path.clone()));
+            let douyin_platform = Arc::new(DouyinPlatform::with_storage((*db_manager).clone()));
+            let browser_automator = Arc::new(Mutex::new(BrowserAutomator::new()));
+            let app_state = AppState {
+                db_manager,
+                douyin_platform,
+                browser_automator,
+            };
+
+            app.manage(app_state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             get_supported_platforms,

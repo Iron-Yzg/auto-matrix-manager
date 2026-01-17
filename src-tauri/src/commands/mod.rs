@@ -4,7 +4,7 @@
 use crate::core::*;
 use crate::storage::DatabaseManager;
 use crate::platforms::douyin::DouyinPlatform;
-use crate::browser::{BrowserAutomator, BrowserAuthResult};
+use crate::browser::{BrowserAutomator, BrowserAuthResult, BrowserAuthStep};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use serde::Serialize;
@@ -82,7 +82,7 @@ pub fn get_accounts(
         _ => return Err(format!("Unknown platform: {}", platform)),
     };
 
-    let data_path = app.path().data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
     db_manager.get_accounts_by_platform(platform_type)
         .map_err(|e| e.to_string())
@@ -93,7 +93,7 @@ pub fn delete_account(
     app: AppHandle,
     account_id: &str,
 ) -> Result<bool, String> {
-    let data_path = app.path().data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
     db_manager.delete_account(account_id)
         .map_err(|e| e.to_string())
@@ -133,7 +133,7 @@ pub fn add_account(
         created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     };
 
-    let data_path = app.path().data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
     db_manager.save_account(&account)
         .map_err(|e| e.to_string())?;
@@ -149,7 +149,7 @@ pub fn get_publications(
     _platform: &str,
     account_id: &str,
 ) -> Result<Vec<PlatformPublication>, String> {
-    let data_path = app.path().data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
     db_manager.get_publications_by_account(account_id)
         .map_err(|e| e.to_string())
@@ -170,7 +170,7 @@ pub fn publish_video(
         _ => return Err(format!("Unsupported platform: {}", platform)),
     };
 
-    let data_path = app.path().data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path.clone());
 
     let _account = match db_manager.get_account(account_id) {
@@ -240,6 +240,44 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
 
     let result = automator.get_result().clone();
     eprintln!("[Command] start_browser_auth result: step={}, need_poll={}", result.step, result.need_poll);
+
+    // 如果在初始化阶段就完成了授权，保存到数据库
+    if matches!(result.step, BrowserAuthStep::Completed) && !result.cookie.is_empty() {
+        eprintln!("[Command] Authorization completed in initialization, saving to database...");
+        
+        match save_browser_credentials(&_app, &result, platform) {
+            Ok(account) => {
+                eprintln!("[Command] Account saved successfully: {}", account.nickname);
+                return Ok(BrowserAuthStatusResult {
+                    step: "Completed".to_string(),
+                    message: format!("授权完成！账号: {}", account.nickname),
+                    current_url: result.current_url,
+                    screenshot: result.screenshot,
+                    need_poll: false,
+                    cookie: result.cookie,
+                    local_storage: result.local_storage,
+                    nickname: account.nickname,
+                    avatar_url: account.avatar_url,
+                    error: None,
+                });
+            },
+            Err(e) => {
+                eprintln!("[Command] Failed to save account: {}", e);
+                return Ok(BrowserAuthStatusResult {
+                    step: "Completed".to_string(),
+                    message: format!("授权完成但保存失败: {}", e),
+                    current_url: result.current_url,
+                    screenshot: result.screenshot,
+                    need_poll: false,
+                    cookie: result.cookie,
+                    local_storage: result.local_storage,
+                    nickname: result.nickname,
+                    avatar_url: result.avatar_url,
+                    error: Some(e),
+                });
+            }
+        }
+    }
 
     Ok(BrowserAuthStatusResult {
         step: format!("{:?}", result.step),
@@ -367,7 +405,7 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
     };
 
     // 保存到数据库
-    let data_path = app.path().data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
     db_manager.save_account(&account)
         .map_err(|e| e.to_string())?;
