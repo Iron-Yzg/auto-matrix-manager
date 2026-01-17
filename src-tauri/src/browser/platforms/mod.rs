@@ -4,3 +4,4 @@
 pub mod douyin_browser_playwright;
 
 pub use douyin_browser_playwright::DouyinBrowserPlaywright;
+pub use douyin_browser_playwright::{check_playwright_env, ensure_playwright_env};

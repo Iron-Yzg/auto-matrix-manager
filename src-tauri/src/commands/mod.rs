@@ -347,89 +347,14 @@ pub async fn cancel_browser_auth(state: tauri::State<'_, AppState>) -> Result<()
 
 /// 保存从浏览器提取的凭证到数据库
 fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str) -> Result<UserAccount, String> {
-    // Node.js 输出的是数组格式: [{"key": "...", "value": "..."}, ...]
-    let local_data_items: Vec<serde_json::Value> = if let Ok(items) = serde_json::from_str::<serde_json::Value>(&result.local_storage) {
-        if let Some(arr) = items.as_array() {
-            arr.iter()
-                .filter_map(|item| {
-                    let key = item.get("key")?.as_str()?;
-                    let value = item.get("value")?.as_str()?;
-                    Some(serde_json::json!({
-                        "key": key,
-                        "value": value
-                    }))
-                })
-                .collect()
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
-    };
-
-    eprintln!("[Rust] local_data_items count: {}", local_data_items.len());
-    if local_data_items.is_empty() {
-        eprintln!("[Rust WARN] local_storage parsing failed or empty!");
-    } else {
-        eprintln!("[Rust] localStorage keys: {}", local_data_items.iter()
-            .filter_map(|item| item.get("key").and_then(|k| k.as_str()))
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-
-    // 解析捕获的 request_headers
-    let request_headers: serde_json::Value = serde_json::from_str(&result.request_headers)
+    // Node.js 已经组装好了 third_param，直接使用
+    let third_param: serde_json::Value = serde_json::from_str(&result.request_headers)
         .unwrap_or(serde_json::json!({}));
 
-    eprintln!("[Rust] result.request_headers: {}", result.request_headers);
-    eprintln!("[Rust] parsed request_headers: {}", request_headers);
-
-    // 检查 request_headers 是否为空
-    if result.request_headers.is_empty() || result.request_headers == "{}" {
-        eprintln!("[Rust WARN] request_headers is empty! No API request was captured.");
-    }
-
-    // 从 request_headers 中获取 cookie（与 Python 逻辑一致）
-    let request_cookie = request_headers.get("cookie")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    // 如果 request_headers 中的 cookie 为空，使用浏览器 cookies 作为备选
-    let cookie_for_use = if !request_cookie.is_empty() {
-        request_cookie.to_string()
-    } else if !result.cookie.is_empty() {
-        eprintln!("[Rust] Using browser cookie as fallback (request_headers.cookie was empty)");
-        result.cookie.clone()
-    } else {
-        eprintln!("[Rust WARN] No cookie available!");
-        String::new()
-    };
-
-    eprintln!("[Rust] Cookie length: {}", cookie_for_use.len());
-    eprintln!("[Rust] Cookie preview: {}", &cookie_for_use[..std::cmp::min(100, cookie_for_use.len())]);
-
-    // 从 request_headers 中提取 third_param（与 Python 逻辑完全一致）
-    let third_param = serde_json::json!({
-        "accept": request_headers.get("accept").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "cookie": cookie_for_use,
-        "referer": "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
-        "local_data": local_data_items,
-        "sec-ch-ua": request_headers.get("sec-ch-ua").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "user-agent": request_headers.get("user-agent").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "sec-fetch-dest": request_headers.get("sec-fetch-dest").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "sec-fetch-mode": request_headers.get("sec-fetch-mode").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "sec-fetch-site": request_headers.get("sec-fetch-site").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "accept-encoding": request_headers.get("accept-encoding").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "accept-language": request_headers.get("accept-language").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "sec-ch-ua-mobile": request_headers.get("sec-ch-ua-mobile").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "sec-ch-ua-platform": request_headers.get("sec-ch-ua-platform").unwrap_or(&serde_json::json!("")).as_str().unwrap_or(""),
-        "x-secsdk-csrf-token": request_headers.get("x-secsdk-csrf-token").unwrap_or(&serde_json::json!("")).as_str().unwrap_or("")
-    });
-
-    // third_id 直接从 API 响应的 uid 获取（与 Python 逻辑一致）
+    // third_id 即 uid
     let third_id = result.uid.clone();
 
-    // 构建 params JSON - 与 dy_account.json 结构一致，只保留 third_id 和 third_param
+    // 构建 params JSON
     let params = serde_json::json!({
         "third_id": third_id,
         "third_param": third_param

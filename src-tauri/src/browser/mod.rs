@@ -4,6 +4,7 @@
 pub mod platforms;
 
 pub use platforms::DouyinBrowserPlaywright;
+pub use platforms::{check_playwright_env, ensure_playwright_env};
 
 use std::fmt;
 use serde::{Deserialize, Serialize};

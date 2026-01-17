@@ -26,7 +26,7 @@ pub fn run() {
     use crate::storage::DatabaseManager;
     use crate::platforms::douyin::DouyinPlatform;
     use crate::commands::AppState;
-    use crate::browser::BrowserAutomator;
+    use crate::browser::{BrowserAutomator, check_playwright_env, ensure_playwright_env};
     use tauri::Manager;
 
     tauri::Builder::default()
@@ -46,8 +46,25 @@ pub fn run() {
 
             // Create data directory if needed
             std::fs::create_dir_all(&data_path).ok();
-            
+
             eprintln!("[App] Database path: {:?}", data_path.join("matrix.db"));
+
+            // 检查 Playwright 环境（非阻塞方式）
+            let (playwright_ok, chromium_ok) = check_playwright_env();
+            if !playwright_ok || !chromium_ok {
+                eprintln!("[App] Playwright 环境未安装，正在后台安装...");
+
+                // 在后台线程安装
+                std::thread::spawn(move || {
+                    if let Err(e) = ensure_playwright_env() {
+                        eprintln!("[App] Playwright 环境安装失败: {}", e);
+                    } else {
+                        eprintln!("[App] Playwright 环境安装完成");
+                    }
+                });
+            } else {
+                eprintln!("[App] Playwright 环境检查通过");
+            }
 
             let db_manager = Arc::new(DatabaseManager::new(data_path.clone()));
             let douyin_platform = Arc::new(DouyinPlatform::with_storage((*db_manager).clone()));
