@@ -24,7 +24,6 @@ use tokio::sync::Mutex;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use crate::storage::DatabaseManager;
-    use crate::platforms::douyin::DouyinPlatform;
     use crate::commands::AppState;
     use crate::browser::{BrowserAutomator, check_playwright_env, ensure_playwright_env};
     use tauri::Manager;
@@ -50,28 +49,28 @@ pub fn run() {
             eprintln!("[App] Database path: {:?}", data_path.join("matrix.db"));
 
             // 检查 Playwright 环境（非阻塞方式）
-            let (playwright_ok, chromium_ok) = check_playwright_env();
-            if !playwright_ok || !chromium_ok {
-                eprintln!("[App] Playwright 环境未安装，正在后台安装...");
+            match check_playwright_env() {
+                Ok(_) => {
+                    eprintln!("[App] Playwright 环境检查通过");
+                }
+                Err(e) => {
+                    eprintln!("[App] Playwright 环境检查失败: {}，正在后台安装...", e);
 
-                // 在后台线程安装
-                std::thread::spawn(move || {
-                    if let Err(e) = ensure_playwright_env() {
-                        eprintln!("[App] Playwright 环境安装失败: {}", e);
-                    } else {
-                        eprintln!("[App] Playwright 环境安装完成");
-                    }
-                });
-            } else {
-                eprintln!("[App] Playwright 环境检查通过");
+                    // 在后台线程安装
+                    std::thread::spawn(move || {
+                        if let Err(e) = ensure_playwright_env() {
+                            eprintln!("[App] Playwright 环境安装失败: {}", e);
+                        } else {
+                            eprintln!("[App] Playwright 环境安装完成");
+                        }
+                    });
+                }
             }
 
             let db_manager = Arc::new(DatabaseManager::new(data_path.clone()));
-            let douyin_platform = Arc::new(DouyinPlatform::with_storage((*db_manager).clone()));
             let browser_automator = Arc::new(Mutex::new(BrowserAutomator::new()));
             let app_state = AppState {
                 db_manager,
-                douyin_platform,
                 browser_automator,
             };
 
@@ -89,6 +88,9 @@ pub fn run() {
             start_browser_auth,
             check_browser_auth_status,
             cancel_browser_auth,
+            get_extractor_configs,
+            get_extractor_config,
+            save_extractor_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

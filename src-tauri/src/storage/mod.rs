@@ -16,6 +16,22 @@ pub struct DatabaseManager {
     pub base_path: PathBuf,
 }
 
+/// Platform extractor configuration struct
+/// 平台提取引擎配置结构
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExtractorConfig {
+    pub id: String,
+    pub platform_id: String,
+    pub platform_name: String,
+    pub login_url: String,
+    pub login_success_pattern: String,
+    pub redirect_url: Option<String>,
+    pub extract_rules: serde_json::Value,
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl DatabaseManager {
     /// Create a new database manager
     /// 创建新的数据库管理器
@@ -80,6 +96,25 @@ impl DatabaseManager {
                 FOREIGN KEY (account_id) REFERENCES accounts(id)
             )
         "#, [])?;
+
+        // Platform extractor configs table - 平台数据提取引擎配置
+        conn.execute(r#"
+            CREATE TABLE IF NOT EXISTS extractor_configs (
+                id TEXT PRIMARY KEY,
+                platform_id TEXT NOT NULL UNIQUE,
+                platform_name TEXT NOT NULL,
+                login_url TEXT NOT NULL,
+                login_success_pattern TEXT NOT NULL,
+                redirect_url TEXT,
+                extract_rules TEXT NOT NULL,
+                is_default INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        "#, [])?;
+
+        // Initialize default configurations for supported platforms
+        Self::initialize_default_configs(conn)?;
 
         Ok(())
     }
@@ -365,5 +400,164 @@ impl DatabaseManager {
             "failed" => PublicationStatus::Failed,
             _ => PublicationStatus::Draft,
         }
+    }
+
+    // ============================================================================
+    // 平台提取引擎配置操作
+    // ============================================================================
+
+    /// Initialize default configurations for supported platforms
+    /// 初始化支持的平台的默认配置
+    fn initialize_default_configs(conn: &Connection) -> Result<()> {
+        // Default Douyin configuration
+        let douyin_rules = serde_json::json!({
+            "uid": "${api:/account/api/v1/user/account/info:response:body:user:uid}",
+            "nickname": "${api:/web/api/media/user/info:response:body:user:nickname}",
+            "avatar_url": "${api:/web/api/media/user/info:response:body:user:avatar_thumb:url_list:0}",
+            "cookie": "${api:/account/api/v1/user/account/info:request:headers:cookie}",
+            "sec_uid": "${api:/web/api/media/user/info:response:body:user:sec_uid}",
+            "local_storage_keys": [
+                "security-sdk/s_sdk_cert_key",
+                "security-sdk/s_sdk_crypt_sdk",
+                "security-sdk/s_sdk_pri_key",
+                "security-sdk/s_sdk_pub_key"
+            ]
+        });
+
+        let configs = vec![
+            (
+                "douyin",
+                "抖音",
+                "https://creator.douyin.com/",
+                r#"**/creator-micro/**"#,
+                Some("https://creator.douyin.com/creator-micro/content/post"),
+                douyin_rules,
+            ),
+            // Add more platform defaults as needed
+        ];
+
+        for (platform_id, platform_name, login_url, pattern, redirect_url, rules) in configs {
+            conn.execute(
+                r#"INSERT OR IGNORE INTO extractor_configs
+                    (id, platform_id, platform_name, login_url, login_success_pattern, redirect_url, extract_rules, is_default)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)"#,
+                &[
+                    &format!("config_{}", platform_id),
+                    platform_id,
+                    platform_name,
+                    login_url,
+                    pattern,
+                    redirect_url.unwrap_or_default(),
+                    &rules.to_string(),
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Save extractor configuration
+    /// 保存提取引擎配置
+    pub fn save_extractor_config(&self, config: &ExtractorConfig) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        conn.execute(r#"
+            INSERT OR REPLACE INTO extractor_configs (
+                id, platform_id, platform_name, login_url, login_success_pattern,
+                redirect_url, extract_rules, is_default, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        "#, &[
+            &config.id,
+            &config.platform_id,
+            &config.platform_name,
+            &config.login_url,
+            &config.login_success_pattern,
+            &config.redirect_url.as_ref().unwrap_or(&String::new()),
+            &config.extract_rules.to_string(),
+            &if config.is_default { "1".to_string() } else { "0".to_string() },
+        ])?;
+
+        Ok(())
+    }
+
+    /// Get extractor configuration by platform ID
+    /// 根据平台 ID 获取提取引擎配置
+    pub fn get_extractor_config(&self, platform_id: &str) -> Result<Option<ExtractorConfig>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM extractor_configs WHERE platform_id = ?")?;
+
+        match stmt.query_row([platform_id], |row| {
+            Ok(ExtractorConfig {
+                id: row.get(0)?,
+                platform_id: row.get(1)?,
+                platform_name: row.get(2)?,
+                login_url: row.get(3)?,
+                login_success_pattern: row.get(4)?,
+                redirect_url: Some(row.get(5)?),
+                extract_rules: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or(serde_json::json!({})),
+                is_default: row.get::<_, i32>(7)? == 1,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        }) {
+            Ok(config) => Ok(Some(config)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get all extractor configurations
+    /// 获取所有提取引擎配置
+    pub fn get_all_extractor_configs(&self) -> Result<Vec<ExtractorConfig>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM extractor_configs ORDER BY platform_name")?;
+        let configs = stmt.query_map([], |row| {
+            let rules_str: String = row.get(6)?;
+            let rules: serde_json::Value = serde_json::from_str(&rules_str).unwrap_or(serde_json::json!({}));
+
+            Ok(ExtractorConfig {
+                id: row.get(0)?,
+                platform_id: row.get(1)?,
+                platform_name: row.get(2)?,
+                login_url: row.get(3)?,
+                login_success_pattern: row.get(4)?,
+                redirect_url: Some(row.get(5)?),
+                extract_rules: rules,
+                is_default: row.get::<_, i32>(7)? == 1,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(configs)
+    }
+
+    /// Delete extractor configuration
+    /// 删除提取引擎配置
+    pub fn delete_extractor_config(&self, platform_id: &str) -> Result<bool, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        // Prevent deleting default configurations
+        let is_default = conn.query_row(
+            "SELECT is_default FROM extractor_configs WHERE platform_id = ?",
+            [platform_id],
+            |row| row.get::<_, i32>(0)
+        ).unwrap_or(0) == 1;
+
+        if is_default {
+            return Err(rusqlite::Error::IntegralValueOutOfRange(
+                0,
+                0
+            ));
+        }
+
+        let rows = conn.execute(
+            "DELETE FROM extractor_configs WHERE platform_id = ?",
+            [platform_id],
+        )?;
+
+        Ok(rows > 0)
     }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { PLATFORMS, type Platform } from '../types'
+import ExtractorConfigEditor from '../components/ExtractorConfigEditor.vue'
 
 interface PlatformCredentials {
   accessKey: string
@@ -14,6 +15,17 @@ const credentials = ref<Record<Platform, PlatformCredentials>>({
   bilibili: { accessKey: '', accessSecret: '' }
 })
 
+// 提取引擎配置弹窗状态
+const extractorConfigDialog = ref<{
+  open: boolean
+  platformId: string
+  platformName: string
+}>({
+  open: false,
+  platformId: '',
+  platformName: ''
+})
+
 const handleSave = (platform: Platform) => {
   console.log('Saving credentials for:', platform, credentials.value[platform])
 }
@@ -22,13 +34,32 @@ const handleReset = (platform: Platform) => {
   credentials.value[platform].accessKey = ''
   credentials.value[platform].accessSecret = ''
 }
+
+// 打开提取引擎配置
+const openExtractorConfig = (platform: typeof PLATFORMS[0]) => {
+  extractorConfigDialog.value = {
+    open: true,
+    platformId: platform.id,
+    platformName: platform.name
+  }
+}
+
+// 关闭提取引擎配置弹窗
+const closeExtractorConfig = () => {
+  extractorConfigDialog.value.open = false
+}
+
+// 提取引擎配置保存成功
+const onExtractorConfigSaved = () => {
+  console.log('Extractor config saved')
+}
 </script>
 
 <template>
   <div class="h-full flex flex-col p-6">
     <div class="mb-4 flex-shrink-0">
       <h1 class="text-lg font-semibold text-slate-800">平台设置</h1>
-      <p class="text-sm text-slate-500 mt-1">配置各平台的 API 凭证信息</p>
+      <p class="text-sm text-slate-500 mt-1">配置各平台的 API 凭证信息和数据提取引擎</p>
     </div>
 
     <div class="flex-1 bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col">
@@ -39,10 +70,16 @@ const handleReset = (platform: Platform) => {
               <div class="w-10 h-10 rounded-lg flex items-center justify-center" :style="{ backgroundColor: platform.color + '15' }">
                 <img :src="platform.icon" :alt="platform.name" class="w-6 h-6 object-contain" />
               </div>
-              <div>
+              <div class="flex-1">
                 <h3 class="text-sm font-semibold text-slate-800">{{ platform.name }}</h3>
                 <p class="text-xs text-slate-400">配置 {{ platform.name }} 开放平台 API 凭证</p>
               </div>
+              <button
+                @click="openExtractorConfig(platform)"
+                class="px-3 py-1.5 bg-indigo-50 text-indigo-600 text-xs font-medium rounded-lg hover:bg-indigo-100 transition-colors"
+              >
+                数据提取引擎
+              </button>
             </div>
 
             <div class="space-y-3">
@@ -84,5 +121,14 @@ const handleReset = (platform: Platform) => {
         </div>
       </div>
     </div>
+
+    <!-- 提取引擎配置弹窗 -->
+    <ExtractorConfigEditor
+      v-if="extractorConfigDialog.open"
+      :platform-id="extractorConfigDialog.platformId"
+      :platform-name="extractorConfigDialog.platformName"
+      @close="closeExtractorConfig"
+      @saved="onExtractorConfigSaved"
+    />
   </div>
 </template>

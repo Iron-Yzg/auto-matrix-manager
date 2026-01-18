@@ -2,8 +2,8 @@
 // 命令模块 - Tauri 应用命令
 
 use crate::core::*;
-use crate::storage::DatabaseManager;
 use crate::platforms::douyin::DouyinPlatform;
+use crate::storage::{DatabaseManager, ExtractorConfig};
 use crate::browser::{BrowserAutomator, BrowserAuthResult, BrowserAuthStep};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
@@ -14,7 +14,6 @@ use serde::Serialize;
 #[derive(Clone)]
 pub struct AppState {
     pub db_manager: Arc<DatabaseManager>,
-    pub douyin_platform: Arc<DouyinPlatform>,
     pub browser_automator: Arc<tokio::sync::Mutex<BrowserAutomator>>,
 }
 
@@ -228,10 +227,11 @@ pub struct BrowserAuthStatusResult {
 #[tauri::command]
 pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppState>, platform: &str, _chrome_path: Option<&str>) -> Result<BrowserAuthStatusResult, String> {
     eprintln!("[Command] start_browser_auth called for platform: {}", platform);
+
     let mut automator = state.browser_automator.lock().await;
 
-    // 使用 Playwright 版本启动抖音授权
-    automator.start_douyin()
+    // 使用通用规则引擎启动授权
+    automator.start_authorize(&state.db_manager, platform)
         .await
         .map_err(|e| format!("启动浏览器失败: {}", e))?;
 
@@ -241,7 +241,7 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
     // 如果在初始化阶段就完成了授权，保存到数据库
     if matches!(result.step, BrowserAuthStep::Completed) && !result.cookie.is_empty() {
         eprintln!("[Command] Authorization completed in initialization, saving to database...");
-        
+
         match save_browser_credentials(&_app, &result, platform) {
             Ok(account) => {
                 eprintln!("[Command] Account saved successfully: {}", account.nickname);
@@ -402,4 +402,98 @@ fn get_platform_name(platform: &str) -> &'static str {
         "bilibili" => "B站",
         _ => "未知",
     }
+}
+
+// ============================================================================
+// Extractor Config Management Commands
+// 提取引擎配置管理命令
+// ============================================================================
+
+/// 获取所有平台提取引擎配置
+#[tauri::command]
+pub fn get_extractor_configs(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+
+    db_manager.get_all_extractor_configs()
+        .map_err(|e| e.to_string())
+        .map(|configs| {
+            configs.into_iter().map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "platform_id": c.platform_id,
+                    "platform_name": c.platform_name,
+                    "login_url": c.login_url,
+                    "login_success_pattern": c.login_success_pattern,
+                    "redirect_url": c.redirect_url,
+                    "extract_rules": c.extract_rules,
+                    "is_default": c.is_default,
+                    "created_at": c.created_at,
+                    "updated_at": c.updated_at,
+                })
+            }).collect()
+        })
+}
+
+/// 获取指定平台的提取引擎配置
+#[tauri::command]
+pub fn get_extractor_config(app: AppHandle, platform_id: &str) -> Result<Option<serde_json::Value>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+
+    db_manager.get_extractor_config(platform_id)
+        .map_err(|e| e.to_string())
+        .map(|config| {
+            config.map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "platform_id": c.platform_id,
+                    "platform_name": c.platform_name,
+                    "login_url": c.login_url,
+                    "login_success_pattern": c.login_success_pattern,
+                    "redirect_url": c.redirect_url,
+                    "extract_rules": c.extract_rules,
+                    "is_default": c.is_default,
+                    "created_at": c.created_at,
+                    "updated_at": c.updated_at,
+                })
+            })
+        })
+}
+
+/// 保存提取引擎配置
+#[tauri::command]
+pub fn save_extractor_config(
+    app: AppHandle,
+    platform_id: &str,
+    platform_name: &str,
+    login_url: &str,
+    login_success_pattern: &str,
+    redirect_url: Option<&str>,
+    extract_rules: &str,
+) -> Result<bool, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+
+    // 解析 extract_rules JSON
+    let rules: serde_json::Value = serde_json::from_str(extract_rules)
+        .map_err(|e| format!("Invalid extract_rules JSON: {}", e))?;
+
+    let config = ExtractorConfig {
+        id: format!("config_{}", platform_id),
+        platform_id: platform_id.to_string(),
+        platform_name: platform_name.to_string(),
+        login_url: login_url.to_string(),
+        login_success_pattern: login_success_pattern.to_string(),
+        redirect_url: redirect_url.map(|s| s.to_string()),
+        extract_rules: rules,
+        is_default: false,
+        created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        updated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+
+    db_manager.save_extractor_config(&config)
+        .map_err(|e| e.to_string())?;
+
+    Ok(true)
 }

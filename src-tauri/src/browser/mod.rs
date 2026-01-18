@@ -1,13 +1,18 @@
 // Browser Automation Module
-// 浏览器自动化模块 - 使用 Playwright 实现
+// 浏览器自动化模块 - 使用通用规则引擎
 
-pub mod platforms;
+pub mod data_extractor_engine;
+pub mod generic_browser;
+pub mod playwright_env;
 
-pub use platforms::DouyinBrowserPlaywright;
-pub use platforms::{check_playwright_env, ensure_playwright_env};
+pub use generic_browser::GenericBrowser;
+pub use playwright_env::{check_playwright_env, ensure_playwright_env};
+pub use data_extractor_engine::DataExtractorEngine;
 
 use std::fmt;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use crate::storage::DatabaseManager;
 
 // ============================================================================
 // Browser Auth Types
@@ -85,9 +90,9 @@ impl Default for BrowserAuthResult {
     }
 }
 
-/// 浏览器自动化器（使用 Playwright）
+/// 浏览器自动化器（使用通用规则引擎）
 pub struct BrowserAutomator {
-    browser: Option<DouyinBrowserPlaywright>,
+    browser: Option<GenericBrowser>,
     result: BrowserAuthResult,
 }
 
@@ -99,20 +104,21 @@ impl BrowserAutomator {
         }
     }
 
-    /// 启动抖音授权流程
-    pub async fn start_douyin(&mut self) -> Result<(), String> {
-        let mut douyin_browser = DouyinBrowserPlaywright::new();
-        let result = douyin_browser.start_authorize().await?;
-        self.browser = Some(douyin_browser);
+    /// 启动通用授权流程
+    pub async fn start_authorize(&mut self, db_manager: &Arc<DatabaseManager>, platform_id: &str) -> Result<(), String> {
+        let mut browser = GenericBrowser::new();
+        browser.set_db_manager(db_manager.clone());
+        let result = browser.start_authorize(platform_id).await?;
+        self.browser = Some(browser);
         self.result = result;
         Ok(())
     }
 
     /// 检查登录状态并提取凭证
+    /// GenericBrowser 同步完成授权，此方法返回当前状态
     pub async fn check_and_extract(&mut self) -> Result<bool, String> {
         match &mut self.browser {
             Some(browser) => {
-                browser.check_and_extract().await?;
                 let browser_result = browser.get_result();
                 self.result.step = browser_result.step.clone();
                 self.result.message = browser_result.message.clone();

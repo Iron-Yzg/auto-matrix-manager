@@ -1,20 +1,29 @@
-// Douyin Browser Implementation - 使用 Playwright 网络事件监听
-// Playwright 可以在不注入 JS 的情况下捕获所有网络请求/响应
+// Generic Browser Implementation - 通用规则引擎浏览器
+// 使用配置规则从数据库中提取任意平台的用户信息
 
 use crate::browser::{BrowserAuthResult, BrowserAuthStep};
+use crate::storage::DatabaseManager;
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-/// 抖音浏览器实现（Playwright 版本）
-pub struct DouyinBrowserPlaywright {
+/// 通用浏览器实现（使用规则引擎）
+pub struct GenericBrowser {
     result: BrowserAuthResult,
+    db_manager: Option<Arc<DatabaseManager>>,
 }
 
-impl DouyinBrowserPlaywright {
+impl GenericBrowser {
     pub fn new() -> Self {
         Self {
             result: BrowserAuthResult::default(),
+            db_manager: None,
         }
+    }
+
+    /// 设置数据库管理器
+    pub fn set_db_manager(&mut self, db_manager: Arc<DatabaseManager>) {
+        self.db_manager = Some(db_manager);
     }
 
     /// 获取 Playwright 目录
@@ -32,14 +41,16 @@ impl DouyinBrowserPlaywright {
         Self::get_playwright_dir().join("browsers")
     }
 
-    /// 启动抖音授权流程（使用 Playwright）
-    pub async fn start_authorize(&mut self) -> Result<BrowserAuthResult, String> {
+    /// 启动通用授权流程
+    pub async fn start_authorize(&mut self, platform_id: &str) -> Result<BrowserAuthResult, String> {
         self.result.step = BrowserAuthStep::LaunchingBrowser;
-        self.result.message = "正在启动浏览器...".to_string();
+        self.result.message = format!("正在启动浏览器 for {}...", platform_id);
 
         // 在阻塞线程中运行 Playwright 脚本
+        let db_manager = self.db_manager.clone();
+        let platform_id = platform_id.to_string();
         let result = tokio::task::spawn_blocking(move || {
-            Self::run_script()
+            Self::run_script(db_manager, &platform_id)
         }).await;
 
         match result {
@@ -63,12 +74,12 @@ impl DouyinBrowserPlaywright {
         }
     }
 
-    /// 读取 Node.js 脚本文件
+    /// 读取通用脚本文件
     fn read_script_file() -> Result<String, String> {
         let source_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()
             .unwrap_or(&std::path::PathBuf::from("."))
             .to_path_buf();
-        let script_path = source_dir.join("scripts").join("douyin_auth.cjs");
+        let script_path = source_dir.join("scripts").join("generic_extractor.cjs");
 
         if script_path.exists() {
             std::fs::read_to_string(&script_path)
@@ -78,68 +89,148 @@ impl DouyinBrowserPlaywright {
         }
     }
 
+    /// 从数据库加载配置
+    fn load_config(db_manager: &Arc<DatabaseManager>, platform_id: &str) -> Result<String, String> {
+        eprintln!("[GenericBrowser] 正在查询平台配置: {}", platform_id);
+
+        match db_manager.get_extractor_config(platform_id) {
+            Ok(Some(config)) => {
+                eprintln!("[GenericBrowser] 找到配置: platform_name={}, login_url={}",
+                    config.platform_name, config.login_url);
+
+                let config_obj = serde_json::json!({
+                    "platform_id": config.platform_id,
+                    "platform_name": config.platform_name,
+                    "login_url": config.login_url,
+                    "login_success_pattern": config.login_success_pattern,
+                    "extract_rules": config.extract_rules
+                });
+                Ok(config_obj.to_string())
+            }
+            Ok(None) => {
+                eprintln!("[GenericBrowser] 未找到平台配置: {}", platform_id);
+                Err(format!("未找到平台配置: {}", platform_id))
+            }
+            Err(e) => {
+                eprintln!("[GenericBrowser] 读取配置失败: {}", e);
+                Err(format!("读取配置失败: {}", e))
+            }
+        }
+    }
+
     /// 在阻塞线程中运行 Playwright 脚本
-    fn run_script() -> Result<BrowserAuthResult, String> {
+    fn run_script(db_manager: Option<Arc<DatabaseManager>>, platform_id: &str) -> Result<BrowserAuthResult, String> {
+        eprintln!("[GenericBrowser] run_script called for platform: {}", platform_id);
+
+        // 从数据库加载配置
+        let config_json = if let Some(ref db) = db_manager {
+            Self::load_config(db, platform_id)?
+        } else {
+            return Err("数据库管理器未设置".to_string());
+        };
+
+        eprintln!("[GenericBrowser] 配置 JSON 长度: {} bytes", config_json.len());
+
         // 从文件读取 Node.js 脚本
         let script = Self::read_script_file()?;
 
-        // 获取 Playwright 目录（使用应用数据目录）
+        // 获取 Playwright 目录
         let playwright_dir = Self::get_playwright_dir();
         let browsers_dir = Self::get_browsers_dir();
 
         // 写入脚本到 Playwright 目录
-        let script_path = playwright_dir.join("douyin_auth_script.js");
+        let script_path = playwright_dir.join("generic_extractor.js");
         if let Err(e) = std::fs::write(&script_path, &script) {
             return Err(format!("无法写入临时脚本: {}", e));
         }
 
-        // 执行脚本 - 从 stdout 读取结果
+        // 执行脚本，通过环境变量传递配置
+        eprintln!("[GenericBrowser] 启动 Node.js 脚本: {} {}", script_path.display(), platform_id);
+        eprintln!("[GenericBrowser] PLAYWRIGHT_BROWSERS_PATH: {}", browsers_dir.to_string_lossy().as_ref());
+        eprintln!("[GenericBrowser] AMM_CONFIG 长度: {}", config_json.len());
+
         let mut child = std::process::Command::new("node")
             .arg(&script_path)
+            .arg(platform_id)
             .env("PLAYWRIGHT_BROWSERS_PATH", browsers_dir.to_string_lossy().as_ref())
+            .env("AMM_CONFIG", &config_json)
             .current_dir(&playwright_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("无法启动脚本: {}", e))?;
 
+        eprintln!("[GenericBrowser] Node.js 进程已启动, pid: {}", child.id());
+
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
 
-        // 收集 stdout 中的结果（用 RESULT_JSON_START/END 标记）
-        let mut result_lines = Vec::new();
-        let mut in_result = false;
+        // 使用 mpsc 通道来实时传输 stderr 日志
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        // 读取 stderr（打印到控制台）
+        // 读取 stderr 的线程
         let stderr_handle = std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("[DouyinBrowser-Playwright] {}", line);
+                match line {
+                    Ok(line) => {
+                        if tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
                 }
             }
         });
 
-        // 读取 stdout，提取结果
+        // 读取 stdout，提取结果，同时打印 stderr
         let reader = std::io::BufReader::new(stdout);
+        let mut result_lines = Vec::new();
         let mut in_result = false;
-        for line in reader.lines() {
-            let line = line.map_err(|e| format!("读取输出失败: {}", e))?;
-            if line == "RESULT_JSON_START" {
-                in_result = true;
-                result_lines.clear();
-            } else if line == "RESULT_JSON_END" {
-                break;
-            } else if in_result {
-                result_lines.push(line);
+
+        // 使用 select 模式同时读取 stdout 和 stderr
+        let mut stdout_lines = reader.lines();
+        loop {
+            // 优先检查 stderr 是否有新行
+            match rx.try_recv() {
+                Ok(line) => {
+                    println!("[Node.js] {}", line);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // 没有新的 stderr，尝试读取 stdout
+                    match stdout_lines.next() {
+                        Some(Ok(line)) => {
+                            if line == "RESULT_JSON_START" {
+                                in_result = true;
+                                result_lines.clear();
+                            } else if line == "RESULT_JSON_END" {
+                                break;
+                            } else if in_result {
+                                result_lines.push(line);
+                            }
+                        }
+                        Some(Err(_)) | None => {
+                            // stdout 结束了，等待 stderr 线程完成
+                            break;
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // stderr 线程结束了，继续读取 stdout
+                    break;
+                }
             }
+        }
+
+        // 打印剩余的 stderr
+        while let Ok(line) = rx.try_recv() {
+            println!("[Node.js] {}", line);
         }
 
         // 等待进程结束
         let status = child.wait()
             .map_err(|e| format!("等待脚本结束失败: {}", e))?;
 
-        // 等待 stderr 线程完成
         stderr_handle.join().ok();
 
         if !status.success() {
@@ -155,13 +246,12 @@ impl DouyinBrowserPlaywright {
         Self::parse_result(&result_json)
     }
 
-    /// 解析认证结果（简化版本，直接解析 Node.js 返回的格式）
+    /// 解析认证结果
     fn parse_result(content: &str) -> Result<BrowserAuthResult, String> {
         match serde_json::from_str::<serde_json::Value>(content) {
             Ok(json) => {
                 let mut result = BrowserAuthResult::default();
 
-                // 解析状态
                 if let Some(step) = json.get("step").and_then(|s| s.as_str()) {
                     result.step = match step {
                         "completed" => BrowserAuthStep::Completed,
@@ -177,10 +267,9 @@ impl DouyinBrowserPlaywright {
                     .unwrap_or("完成")
                     .to_string();
 
-                // 简化解析：Node.js 已经组装好了 third_param
                 result.nickname = json.get("nickname")
                     .and_then(|n| n.as_str())
-                    .unwrap_or("抖音用户")
+                    .unwrap_or("用户")
                     .to_string();
 
                 result.avatar_url = json.get("avatar_url")
@@ -193,18 +282,15 @@ impl DouyinBrowserPlaywright {
                     .unwrap_or("")
                     .to_string();
 
-                // 直接序列化 third_param（Node.js 已经组装好）
                 result.request_headers = json.get("third_param")
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "{}".to_string());
 
-                // uid 即 third_id
                 result.uid = json.get("third_id")
                     .and_then(|id| id.as_str())
                     .unwrap_or("")
                     .to_string();
 
-                // cookie 从 third_param 中提取
                 if let Some(cookie) = json.get("third_param")
                     .and_then(|p| p.as_object())
                     .and_then(|p| p.get("cookie"))
@@ -213,7 +299,6 @@ impl DouyinBrowserPlaywright {
                     result.cookie = cookie.to_string();
                 }
 
-                // local_storage 从 third_param.local_data 转换
                 if let Some(local_data) = json.get("third_param")
                     .and_then(|p| p.as_object())
                     .and_then(|p| p.get("local_data"))
@@ -233,11 +318,6 @@ impl DouyinBrowserPlaywright {
         }
     }
 
-    /// 检查登录状态（轮询模式）
-    pub async fn check_and_extract(&mut self) -> Result<bool, String> {
-        Ok(false)
-    }
-
     /// 取消授权
     pub async fn cancel(&mut self) {
         self.result.step = BrowserAuthStep::Idle;
@@ -251,129 +331,8 @@ impl DouyinBrowserPlaywright {
     }
 }
 
-impl Default for DouyinBrowserPlaywright {
+impl Default for GenericBrowser {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// 检查 Playwright 环境（返回是否需要安装）
-pub fn check_playwright_env() -> (bool, bool) {
-    let playwright_dir = get_playwright_dir();
-    let browsers_dir = playwright_dir.join("browsers");
-
-    // 检查 Playwright npm 包
-    let playwright_installed = playwright_dir.join("node_modules").join("playwright").exists();
-
-    // 检查 Chromium 浏览器（实际安装的是 chromium-1200 这样的目录）
-    let chromium_installed = if browsers_dir.exists() {
-        let entries = browsers_dir.read_dir()
-            .map(|e| e.filter_map(|e| e.ok()).map(|e| e.path()).collect::<Vec<_>>());
-        match entries {
-            Ok(entries) => entries.iter()
-                .any(|p| p.is_dir() && p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with("chromium-"))
-                    .unwrap_or(false)),
-            Err(_) => false,
-        }
-    } else {
-        false
-    };
-
-    (playwright_installed, chromium_installed)
-}
-
-/// 安装 Playwright 环境
-pub fn ensure_playwright_env() -> Result<(), String> {
-    let playwright_dir = get_playwright_dir();
-    let browsers_dir = playwright_dir.join("browsers");
-
-    // 检查 Playwright npm 包
-    let playwright_installed = playwright_dir.join("node_modules").join("playwright").exists();
-
-    if !playwright_installed {
-        eprintln!("[Env] 安装 Playwright npm 包...");
-
-        // 创建目录
-        let node_modules = playwright_dir.join("node_modules");
-        if let Err(e) = std::fs::create_dir_all(&node_modules) {
-            return Err(format!("创建目录失败: {}", e));
-        }
-
-        // 写入 package.json
-        let package_json = r#"{
-  "name": "auto-matrix-manager-playwright",
-  "version": "1.0.0",
-  "description": "Playwright for Auto Matrix Manager",
-  "main": "index.js",
-  "type": "commonjs",
-  "dependencies": {
-    "playwright": "^1.50.0"
-  }
-}"#;
-        let package_path = playwright_dir.join("package.json");
-        if let Err(e) = std::fs::write(&package_path, package_json) {
-            return Err(format!("写入 package.json 失败: {}", e));
-        }
-
-        // 执行 npm install
-        let output = std::process::Command::new("npm")
-            .arg("install")
-            .current_dir(&playwright_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| format!("执行 npm install 失败: {}", e))?;
-
-        if !output.status.success() {
-            return Err("安装 Playwright 失败".to_string());
-        }
-        eprintln!("[Env] Playwright npm 包安装完成");
-    }
-
-    // 检查 Chromium 浏览器（实际安装的是 chromium-1200 这样的目录）
-    let chromium_installed = if browsers_dir.exists() {
-        let entries = browsers_dir.read_dir()
-            .map(|e| e.filter_map(|e| e.ok()).map(|e| e.path()).collect::<Vec<_>>());
-        match entries {
-            Ok(entries) => entries.iter()
-                .any(|p| p.is_dir() && p.file_name()
-                    .map(|n| n.to_string_lossy().starts_with("chromium-"))
-                    .unwrap_or(false)),
-            Err(_) => false,
-        }
-    } else {
-        false
-    };
-
-    if !chromium_installed {
-        eprintln!("[Env] 安装 Chromium 浏览器...");
-
-        let output = std::process::Command::new("npx")
-            .arg("playwright")
-            .arg("install")
-            .arg("chromium")
-            .env("PLAYWRIGHT_BROWSERS_PATH", browsers_dir.to_string_lossy().as_ref())
-            .current_dir(&playwright_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| format!("安装 Chromium 失败: {}", e))?;
-
-        if !output.status.success() {
-            return Err("安装 Chromium 失败".to_string());
-        }
-        eprintln!("[Env] Chromium 安装完成");
-    }
-
-    Ok(())
-}
-
-fn get_playwright_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("com.yzg.matrix")
-        .join("playwright")
 }
