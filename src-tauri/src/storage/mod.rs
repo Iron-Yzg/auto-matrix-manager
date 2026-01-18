@@ -409,19 +409,28 @@ impl DatabaseManager {
     /// Initialize default configurations for supported platforms
     /// 初始化支持的平台的默认配置
     fn initialize_default_configs(conn: &Connection) -> Result<()> {
-        // Default Douyin configuration
+        // Default Douyin configuration with proper user_info structure
         let douyin_rules = serde_json::json!({
-            "uid": "${api:/account/api/v1/user/account/info:response:body:user:uid}",
-            "nickname": "${api:/web/api/media/user/info:response:body:user:nickname}",
-            "avatar_url": "${api:/web/api/media/user/info:response:body:user:avatar_thumb:url_list:0}",
-            "cookie": "${api:/account/api/v1/user/account/info:request:headers:cookie}",
-            "sec_uid": "${api:/web/api/media/user/info:response:body:user:sec_uid}",
-            "local_storage_keys": [
+            "user_info": {
+                "nickname": "${api:/web/api/media/user/info:response:body:user:nickname}",
+                "avatar_url": "${api:/web/api/media/user/info:response:body:user:avatar_thumb:url_list:0}",
+                "third_id": "${api:/account/api/v1/user/account/info:response:body:user:uid}",
+                "sec_uid": "${api:/web/api/media/user/info:response:body:user:sec_uid}"
+            },
+            "request_headers": {
+                "cookie": "${api:/account/api/v1/user/account/info:request:headers:cookie}"
+            },
+            "local_storage": [
                 "security-sdk/s_sdk_cert_key",
                 "security-sdk/s_sdk_crypt_sdk",
                 "security-sdk/s_sdk_pri_key",
                 "security-sdk/s_sdk_pub_key"
-            ]
+            ],
+            "cookie": {
+                "source": "from_api",
+                "api_path": "/account/api/v1/user/account/info",
+                "header_name": "cookie"
+            }
         });
 
         let configs = vec![

@@ -62,7 +62,7 @@ pub struct BrowserAuthResult {
     pub local_storage: String,
     pub nickname: String,
     pub avatar_url: String,
-    pub uid: String,
+    pub third_id: String,
     pub sec_uid: String,
     pub error: Option<String>,
     pub screenshot: Option<String>,
@@ -80,7 +80,7 @@ impl Default for BrowserAuthResult {
             local_storage: String::new(),
             nickname: String::new(),
             avatar_url: String::new(),
-            uid: String::new(),
+            third_id: String::new(),
             sec_uid: String::new(),
             error: None,
             screenshot: None,
@@ -127,7 +127,7 @@ impl BrowserAutomator {
                 self.result.local_storage = browser_result.local_storage.clone();
                 self.result.nickname = browser_result.nickname.clone();
                 self.result.avatar_url = browser_result.avatar_url.clone();
-                self.result.uid = browser_result.uid.clone();
+                self.result.third_id = browser_result.third_id.clone();
                 self.result.sec_uid = browser_result.sec_uid.clone();
                 self.result.error = browser_result.error.clone();
                 self.result.need_poll = browser_result.need_poll;

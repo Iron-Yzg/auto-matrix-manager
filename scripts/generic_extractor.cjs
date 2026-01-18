@@ -127,9 +127,15 @@ function evaluateRule(rule, apiData, requestHeaders) {
             for (const [url, data] of Object.entries(apiData)) {
                 if (url.includes(parsed.apiPath)) {
                     if (parsed.requestType === 'request' && parsed.extractType === 'headers') {
-                        // 从请求头提取
+                        // 从请求头提取（HTTP头不区分大小写）
                         if (parsed.fieldPath) {
-                            return data.requestHeaders[parsed.fieldPath] || '';
+                            const lowerField = parsed.fieldPath.toLowerCase();
+                            for (const [headerName, headerValue] of Object.entries(data.requestHeaders)) {
+                                if (headerName.toLowerCase() === lowerField) {
+                                    return headerValue;
+                                }
+                            }
+                            return '';
                         }
                         return JSON.stringify(data.requestHeaders);
                     } else if (parsed.requestType === 'response' && parsed.extractType === 'body') {
@@ -482,32 +488,68 @@ async function main() {
         info(`cookie 前100字符: ${cookie.substring(0, 100)}...`);
         info('===================================');
 
-        // 构建结果
+        // 构建结果 - 保持配置结构，只替换规则
         const result = {
             step: 'completed',
-            message: `授权成功！账号: ${extractedData.nickname || extractedData.uid || config.platform_name + '用户'}`,
-            third_id: extractedData.uid || '',
-            nickname: extractedData.nickname || config.platform_name + '用户',
-            avatar_url: extractedData.avatar_url || '',
+            message: `授权成功！账号: ${extractedData.nickname || config.platform_name + '用户'}`,
             url: page.url(),
-            cookie: cookie,
-            local_storage: JSON.stringify(localStorageItems),
-            // 完整的提取数据
-            extracted_data: extractedData,
-            // 原始 API 数据
-            api_data: capturedApiData,
-            // 配置的平台信息
-            platform_id: platformId,
-            platform_name: config.platform_name,
+            // cookie - 优先从 API 提取，失败则回退到浏览器 cookie
+            cookie: (() => {
+                const cookieRule = extractionRules.cookie;
+                // 如果没有配置规则，使用浏览器 cookie
+                if (!cookieRule) {
+                    return cookieString;
+                }
+                if (typeof cookieRule === 'string') return cookieRule;
+                if (cookieRule.source === 'from_api') {
+                    for (const [url, data] of Object.entries(capturedApiData)) {
+                        if (cookieRule.apiPath && url.includes(cookieRule.apiPath)) {
+                            const headerName = cookieRule.headerName || 'cookie';
+                            const apiCookie = data.requestHeaders[headerName];
+                            if (apiCookie) {
+                                return apiCookie;
+                            }
+                        }
+                    }
+                }
+                return cookieString;
+            })(),
+            // local_storage - 保持配置结构
+            local_storage: localStorageItems,
+            // request_headers - 保持配置结构，替换规则
+            request_headers: (() => {
+                const headers = {};
+                for (const [key, rule] of Object.entries(extractionRules.request_headers || {})) {
+                    if (typeof rule === 'string' && rule.startsWith('${api:')) {
+                        headers[key] = evaluateRule(rule, capturedApiData, requestHeaders);
+                    } else {
+                        headers[key] = rule;
+                    }
+                }
+                return headers;
+            })(),
+            // user_info - 保持配置结构，替换规则
+            user_info: (() => {
+                const userInfo = {};
+                for (const [key, rule] of Object.entries(extractionRules.user_info || {})) {
+                    if (typeof rule === 'string' && rule.startsWith('${api:')) {
+                        userInfo[key] = evaluateRule(rule, capturedApiData, requestHeaders);
+                    } else {
+                        userInfo[key] = rule;
+                    }
+                }
+                return userInfo;
+            })(),
         };
 
-        // 构建 third_param（用于发布）
-        const thirdParam = {
-            ...extractedData,
-            cookie: cookie,
-            local_data: localStorageItems,
-        };
-        result.third_param = thirdParam;
+        // 打印结果摘要
+        info('');
+        info('========== 最终结果 ==========');
+        info(`cookie: ${result.cookie.substring(0, 50)}...`);
+        info(`local_storage: ${result.local_storage.length} 项`);
+        info(`request_headers: ${JSON.stringify(result.request_headers)}`);
+        info(`user_info: ${JSON.stringify(result.user_info)}`);
+        info('================================');
 
         if (outputFile) {
             fs.writeFileSync(outputFile, JSON.stringify(result, null, 2));

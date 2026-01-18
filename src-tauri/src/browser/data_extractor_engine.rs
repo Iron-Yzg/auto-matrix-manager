@@ -233,7 +233,7 @@ impl DataExtractorEngine {
     }
 
     /// 生成认证结果
-    pub fn build_auth_result(&self, nickname: &str, avatar_url: &str, current_url: &str) -> BrowserAuthResult {
+    pub fn build_auth_result(&self, _nickname: &str, _avatar_url: &str, current_url: &str) -> BrowserAuthResult {
         let extract_result = self.extract();
 
         // 构建 third_param JSON
@@ -243,6 +243,20 @@ impl DataExtractorEngine {
             "cookie": extract_result.cookie,
         });
 
+        // 从 user_info HashMap 中提取4个字段
+        let nickname = extract_result.user_info.get("nickname")
+            .cloned()
+            .unwrap_or_default();
+        let avatar_url: String = extract_result.user_info.get("avatar_url")
+            .cloned()
+            .unwrap_or_default();
+        let third_id = extract_result.user_info.get("third_id")
+            .cloned()
+            .unwrap_or_default();
+        let sec_uid = extract_result.user_info.get("sec_uid")
+            .cloned()
+            .unwrap_or_default();
+
         BrowserAuthResult {
             step: if extract_result.success {
                 crate::browser::BrowserAuthStep::Completed
@@ -250,10 +264,10 @@ impl DataExtractorEngine {
                 crate::browser::BrowserAuthStep::Failed(extract_result.message.clone())
             },
             message: extract_result.message.clone(),
-            uid: extract_result.user_info.get("uid").cloned().unwrap_or_default(),
-            sec_uid: extract_result.user_info.get("sec_uid").cloned().unwrap_or_default(),
-            nickname: nickname.to_string(),
-            avatar_url: avatar_url.to_string(),
+            nickname,
+            avatar_url,
+            third_id,
+            sec_uid,
             cookie: extract_result.cookie,
             local_storage: serde_json::to_string(&extract_result.local_storage).unwrap_or_default(),
             request_headers: third_param.to_string(),

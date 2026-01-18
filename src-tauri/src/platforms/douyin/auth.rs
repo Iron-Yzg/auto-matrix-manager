@@ -218,18 +218,3 @@ fn extract_from_localstorage(local_storage: &str, key: &str) -> Option<String> {
     }
     None
 }
-
-/// 从用户提供的Cookie字符串解析凭证（备用方案）
-pub fn parse_credentials_from_cookie_string(cookie_string: &str, user_agent: &str) -> String {
-    let third_id = extract_from_cookies(cookie_string, "tt_webid");
-
-    let params = serde_json::json!({
-        "cookie": cookie_string,
-        "user_agent": user_agent,
-        "third_id": third_id,
-        "sec_uid": "",
-        "local_data": []
-    });
-
-    params.to_string()
-}

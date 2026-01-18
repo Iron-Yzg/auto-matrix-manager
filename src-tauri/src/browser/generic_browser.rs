@@ -246,7 +246,7 @@ impl GenericBrowser {
         Self::parse_result(&result_json)
     }
 
-    /// 解析认证结果
+    /// 解析认证结果 - 直接解析 JS 返回的新格式（保持配置结构，只替换规则）
     fn parse_result(content: &str) -> Result<BrowserAuthResult, String> {
         match serde_json::from_str::<serde_json::Value>(content) {
             Ok(json) => {
@@ -267,44 +267,46 @@ impl GenericBrowser {
                     .unwrap_or("完成")
                     .to_string();
 
-                result.nickname = json.get("nickname")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("用户")
-                    .to_string();
-
-                result.avatar_url = json.get("avatar_url")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
                 result.current_url = json.get("url")
                     .and_then(|u| u.as_str())
                     .unwrap_or("")
                     .to_string();
 
-                result.request_headers = json.get("third_param")
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "{}".to_string());
+                // 从 user_info 对象中提取4个字段
+                if let Some(user_info) = json.get("user_info").and_then(|u| u.as_object()) {
+                    result.nickname = user_info.get("nickname")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    result.avatar_url = user_info.get("avatar_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    result.third_id = user_info.get("third_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    result.sec_uid = user_info.get("sec_uid")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                }
 
-                result.uid = json.get("third_id")
-                    .and_then(|id| id.as_str())
+                // cookie - 直接从顶层获取
+                result.cookie = json.get("cookie")
+                    .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
 
-                if let Some(cookie) = json.get("third_param")
-                    .and_then(|p| p.as_object())
-                    .and_then(|p| p.get("cookie"))
-                    .and_then(|c| c.as_str())
-                {
-                    result.cookie = cookie.to_string();
-                }
+                // local_storage - 转为字符串存储
+                result.local_storage = json.get("local_storage")
+                    .map(|l: &serde_json::Value| l.to_string())
+                    .unwrap_or_else(|| "[]".to_string());
 
-                if let Some(local_data) = json.get("third_param")
-                    .and_then(|p| p.as_object())
-                    .and_then(|p| p.get("local_data"))
-                {
-                    result.local_storage = local_data.to_string();
-                }
+                // request_headers - 转为字符串存储
+                result.request_headers = json.get("request_headers")
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
 
                 result.need_poll = false;
 

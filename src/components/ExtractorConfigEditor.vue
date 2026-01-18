@@ -3,8 +3,8 @@ import { ref, onMounted, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 interface ExtractorRule {
-  field: string
-  rule: string
+  field: string  // 固定字段名: nickname, avatar_url, sec_uid, third_id
+  rule: string   // 提取规则
 }
 
 interface ExtractorConfig {
@@ -55,8 +55,16 @@ const config = ref<ExtractorConfig>({
   is_default: false
 })
 
-// 用户信息提取规则
-const userInfoRules = ref<ExtractorRule[]>([])
+// 用户信息提取规则 - 固定字段
+const userInfoFields = [
+  { key: 'nickname', label: '昵称', desc: '用户昵称' },
+  { key: 'avatar_url', label: '头像', desc: '用户头像 URL' },
+  { key: 'third_id', label: '用户ID', desc: '用户唯一标识' },
+  { key: 'sec_uid', label: 'SecUid', desc: '安全用户ID（部分平台有）' },
+]
+
+// 用户信息提取规则 - 使用 Map 存储以保持顺序
+const userInfoRules = ref<Map<string, string>>(new Map())
 
 // 请求头提取规则
 const headerRules = ref<ExtractorRule[]>([])
@@ -83,10 +91,17 @@ onMounted(async () => {
       // 解析规则
       const rules = result.extract_rules as ExtractorConfig['extract_rules']
 
-      userInfoRules.value = Object.entries(rules.user_info || {}).map(([field, rule]) => ({
-        field,
-        rule
-      }))
+      // 解析用户信息规则 - 填充到 Map
+      const userInfoMap = new Map<string, string>()
+      for (const field of userInfoFields) {
+        const rule = rules.user_info?.[field.key]
+        if (rule) {
+          userInfoMap.set(field.key, rule)
+        } else {
+          userInfoMap.set(field.key, '')
+        }
+      }
+      userInfoRules.value = userInfoMap
 
       headerRules.value = Object.entries(rules.request_headers || {}).map(([field, rule]) => ({
         field,
@@ -100,6 +115,11 @@ onMounted(async () => {
         cookieApiPath.value = rules.cookie.api_path || ''
         cookieHeaderName.value = rules.cookie.header_name || ''
       }
+    } else {
+      // 没有配置时初始化空规则
+      for (const field of userInfoFields) {
+        userInfoRules.value.set(field.key, '')
+      }
     }
   } catch (error) {
     console.error('Failed to load config:', error)
@@ -107,16 +127,6 @@ onMounted(async () => {
     loading.value = false
   }
 })
-
-// 添加用户信息规则
-const addUserInfoRule = () => {
-  userInfoRules.value.push({ field: '', rule: '' })
-}
-
-// 删除用户信息规则
-const removeUserInfoRule = (index: number) => {
-  userInfoRules.value.splice(index, 1)
-}
 
 // 添加请求头规则
 const addHeaderRule = () => {
@@ -152,9 +162,11 @@ const handleSave = async () => {
       }
     }
 
-    for (const r of userInfoRules.value) {
-      if (r.field.trim() && r.rule.trim()) {
-        (extractRules.user_info as Record<string, string>)[r.field.trim()] = r.rule.trim()
+    // 保存用户信息规则 - 从 Map 读取
+    for (const field of userInfoFields) {
+      const rule = userInfoRules.value.get(field.key)
+      if (rule && rule.trim()) {
+        (extractRules.user_info as Record<string, string>)[field.key] = rule.trim()
       }
     }
 
@@ -266,42 +278,29 @@ const ruleSyntaxTips = [
             </div>
           </div>
 
-          <!-- 用户信息提取规则 -->
+          <!-- 用户信息提取规则 - 固定字段 -->
           <div class="mb-6">
             <div class="flex items-center justify-between mb-3">
-              <h3 class="text-sm font-semibold text-slate-800">用户信息提取规则</h3>
-              <button
-                @click="addUserInfoRule"
-                class="text-xs px-2 py-1 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100"
-              >
-                + 添加规则
-              </button>
-            </div>
-            <div class="space-y-2">
-              <div v-for="(rule, index) in userInfoRules" :key="index" class="flex items-center gap-2">
-                <input
-                  v-model="rule.field"
-                  type="text"
-                  placeholder="字段名"
-                  class="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
-                />
-                <input
-                  v-model="rule.rule"
-                  type="text"
-                  placeholder="${api:...}"
-                  class="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
-                />
-                <button
-                  @click="removeUserInfoRule(index)"
-                  class="p-2 text-slate-400 hover:text-red-500"
-                >
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </button>
+              <div>
+                <h3 class="text-sm font-semibold text-slate-800">用户信息提取规则</h3>
+                <p class="text-xs text-slate-400 mt-0.5">以下字段为系统保留字段，请配置对应的提取规则</p>
               </div>
-              <div v-if="userInfoRules.length === 0" class="text-center py-4 text-slate-400 text-sm">
-                暂无规则，点击上方按钮添加
+            </div>
+            <div class="space-y-3">
+              <div v-for="field in userInfoFields" :key="field.key" class="flex items-center gap-3">
+                <!-- 固定字段名（只读） -->
+                <div class="w-24 flex-shrink-0">
+                  <div class="text-sm font-medium text-slate-700">{{ field.label }}</div>
+                  <div class="text-xs text-slate-400">{{ field.desc }}</div>
+                </div>
+                <!-- 规则输入框 -->
+                <input
+                  :value="userInfoRules.get(field.key)"
+                  @input="userInfoRules.set(field.key, ($event.target as HTMLInputElement).value)"
+                  type="text"
+                  :placeholder="`\${api:...} 或固定值`"
+                  class="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:bg-white"
+                />
               </div>
             </div>
           </div>

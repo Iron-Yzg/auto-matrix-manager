@@ -14,6 +14,8 @@ export interface BrowserAuthState {
   screenshot: string | null
   nickname: string
   avatarUrl: string
+  thirdId: string
+  secUid: string
   error: string | null
 }
 
@@ -25,6 +27,8 @@ export function useBrowserAuth() {
     screenshot: null,
     nickname: '',
     avatarUrl: '',
+    thirdId: '',
+    secUid: '',
     error: null,
   })
 
@@ -65,6 +69,8 @@ export function useBrowserAuth() {
       state.value.currentUrl = result.currentUrl || ''
       state.value.nickname = result.nickname
       state.value.avatarUrl = result.avatarUrl
+      state.value.thirdId = result.thirdId
+      state.value.secUid = result.secUid
       state.value.error = result.error || null
 
       console.log('[Auth] result.needPoll:', result.needPoll, 'result.step:', result.step)
@@ -100,6 +106,8 @@ export function useBrowserAuth() {
         state.value.screenshot = result.screenshot || state.value.screenshot
         state.value.nickname = result.nickname || state.value.nickname
         state.value.avatarUrl = result.avatarUrl || state.value.avatarUrl
+        state.value.thirdId = result.thirdId || state.value.thirdId
+        state.value.secUid = result.secUid || state.value.secUid
         state.value.error = result.error || null
 
         // If completed or no longer needs polling, stop

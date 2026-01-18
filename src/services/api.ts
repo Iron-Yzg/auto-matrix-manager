@@ -184,6 +184,8 @@ export interface BrowserAuthStatus {
   localStorage: string
   nickname: string
   avatarUrl: string
+  thirdId: string
+  secUid: string
   error: string | null
 }
 

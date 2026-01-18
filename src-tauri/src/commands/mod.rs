@@ -220,6 +220,8 @@ pub struct BrowserAuthStatusResult {
     pub local_storage: String,
     pub nickname: String,
     pub avatar_url: String,
+    pub third_id: String,
+    pub sec_uid: String,
     pub error: Option<String>,
 }
 
@@ -239,6 +241,10 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
     eprintln!("[Command] start_browser_auth result: step={}, need_poll={}", result.step, result.need_poll);
 
     // 如果在初始化阶段就完成了授权，保存到数据库
+    eprintln!("[Command] Debug: result.step={:?}, cookie.len()={}", result.step, result.cookie.len());
+    eprintln!("[Command] Debug: matches step = {}, cookie empty = {}",
+        matches!(result.step, BrowserAuthStep::Completed), result.cookie.is_empty());
+
     if matches!(result.step, BrowserAuthStep::Completed) && !result.cookie.is_empty() {
         eprintln!("[Command] Authorization completed in initialization, saving to database...");
 
@@ -253,8 +259,10 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
                     need_poll: false,
                     cookie: result.cookie,
                     local_storage: result.local_storage,
-                    nickname: account.nickname,
-                    avatar_url: account.avatar_url,
+                    nickname: result.nickname,
+                    avatar_url: result.avatar_url,
+                    third_id: result.third_id,
+                    sec_uid: result.sec_uid,
                     error: None,
                 });
             },
@@ -270,6 +278,8 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
                     local_storage: result.local_storage,
                     nickname: result.nickname,
                     avatar_url: result.avatar_url,
+                    third_id: result.third_id,
+                    sec_uid: result.sec_uid,
                     error: Some(e),
                 });
             }
@@ -286,6 +296,8 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
         local_storage: result.local_storage,
         nickname: result.nickname,
         avatar_url: result.avatar_url,
+        third_id: result.third_id,
+        sec_uid: result.sec_uid,
         error: result.error,
     })
 }
@@ -305,22 +317,34 @@ pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, A
 
     // 如果已完成，保存凭证到数据库
     if !need_poll && !result.cookie.is_empty() {
-        let account = save_browser_credentials(&app, &result, "douyin")
-            .map_err(|e| format!("保存凭证失败: {}", e))?;
+        eprintln!("[Command] Authorization completed, saving to database...");
+        eprintln!("[Command] nickname: '{}'", result.nickname);
+        eprintln!("[Command] cookie.len(): {}", result.cookie.len());
 
-        // 返回完成的账号信息
-        return Ok(BrowserAuthStatusResult {
-            step: "Completed".to_string(),
-            message: format!("授权成功！账号: {}", account.nickname),
-            current_url: result.current_url,
-            screenshot: result.screenshot,
-            need_poll: false,
-            cookie: result.cookie,
-            local_storage: result.local_storage,
-            nickname: account.nickname,
-            avatar_url: account.avatar_url,
-            error: None,
-        });
+        match save_browser_credentials(&app, &result, "douyin") {
+            Ok(account) => {
+                eprintln!("[Command] Account saved successfully: id={}, nickname={}", account.id, account.nickname);
+                // 返回完成的账号信息
+                return Ok(BrowserAuthStatusResult {
+                    step: "Completed".to_string(),
+                    message: format!("授权成功！账号: {}", account.nickname),
+                    current_url: result.current_url,
+                    screenshot: result.screenshot,
+                    need_poll: false,
+                    cookie: result.cookie,
+                    local_storage: result.local_storage,
+                    nickname: result.nickname,
+                    avatar_url: result.avatar_url,
+                    third_id: result.third_id,
+                    sec_uid: result.sec_uid,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                eprintln!("[Command] Failed to save account: {}", e);
+                return Err(format!("保存凭证失败: {}", e));
+            }
+        }
     }
 
     Ok(BrowserAuthStatusResult {
@@ -333,6 +357,8 @@ pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, A
         local_storage: result.local_storage,
         nickname: result.nickname,
         avatar_url: result.avatar_url,
+        third_id: result.third_id,
+        sec_uid: result.sec_uid,
         error: result.error,
     })
 }
@@ -347,31 +373,50 @@ pub async fn cancel_browser_auth(state: tauri::State<'_, AppState>) -> Result<()
 
 /// 保存从浏览器提取的凭证到数据库
 fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str) -> Result<UserAccount, String> {
-    // Node.js 已经组装好了 third_param，直接使用
+    eprintln!("[Save] save_browser_credentials called");
+    eprintln!("[Save] nickname: '{}'", result.nickname);
+    eprintln!("[Save] avatar_url: '{}'", result.avatar_url);
+    eprintln!("[Save] third_id: '{}'", result.third_id);
+    eprintln!("[Save] sec_uid: '{}'", result.sec_uid);
+    eprintln!("[Save] cookie.len(): {}", result.cookie.len());
+
+    // 构建 third_param - 直接使用 request_headers (JSON string)
     let third_param: serde_json::Value = serde_json::from_str(&result.request_headers)
         .unwrap_or(serde_json::json!({}));
 
-    // third_id 即 uid
-    let third_id = result.uid.clone();
+    // 添加 cookie 和 local_storage 到 third_param
+    let mut third_param_obj = third_param.as_object()
+        .cloned()
+        .unwrap_or_else(|| serde_json::Map::new());
+
+    third_param_obj.insert("cookie".to_string(), serde_json::json!(result.cookie));
+    third_param_obj.insert("local_data".to_string(), serde_json::json!(result.local_storage));
+
+    // 直接从 result 读取字段
+    let third_id = result.third_id.clone();
+    let nickname = if !result.nickname.is_empty() {
+        result.nickname.clone()
+    } else {
+        format!("{}用户", get_platform_name(platform))
+    };
+    let avatar_url = result.avatar_url.clone();
+
+    eprintln!("[Save] third_id: {}", third_id);
+    eprintln!("[Save] nickname: {}", nickname);
+    eprintln!("[Save] avatar_url: {}", avatar_url);
 
     // 构建 params JSON
     let params = serde_json::json!({
         "third_id": third_id,
-        "third_param": third_param
+        "sec_uid": result.sec_uid,
+        "third_param": serde_json::Value::Object(third_param_obj)
     });
-
-    // 构建账号
-    let nickname = if result.nickname.is_empty() {
-        format!("{}用户", get_platform_name(platform))
-    } else {
-        result.nickname.clone()
-    };
 
     let account = UserAccount {
         id: uuid::Uuid::new_v4().to_string(),
         username: nickname.clone(),
         nickname,
-        avatar_url: result.avatar_url.clone(),
+        avatar_url,
         platform: match platform {
             "douyin" => PlatformType::Douyin,
             "xiaohongshu" => PlatformType::Xiaohongshu,
@@ -385,10 +430,13 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
     };
 
     // 保存到数据库
+    eprintln!("[Save] Account to save: id={}, nickname={}, avatar_url={}", account.id, account.nickname, account.avatar_url);
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path);
+    eprintln!("[Save] Database path: {:?}", data_path);
+    let db_manager = DatabaseManager::new(data_path.clone());
     db_manager.save_account(&account)
         .map_err(|e| e.to_string())?;
+    eprintln!("[Save] Account saved successfully!");
 
     Ok(account)
 }

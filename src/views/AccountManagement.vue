@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { PLATFORMS, type Platform } from '../types'
 import { getAccounts, deleteAccount, toFrontendAccount } from '../services/api'
 import { useBrowserAuth, type AuthStep } from '../composables/useBrowserAuth'
@@ -39,6 +39,14 @@ const loadAccounts = async () => {
 
 onMounted(() => {
   loadAccounts()
+})
+
+// Watch for auth completion to refresh account list
+watch(() => state.value.step, (newStep) => {
+  if (newStep === 'completed') {
+    // Reload accounts after successful auth
+    loadAccounts()
+  }
 })
 
 // Platform changed
