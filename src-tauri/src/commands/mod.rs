@@ -777,6 +777,15 @@ pub struct FileSelectionResult {
     pub name: String,
 }
 
+/// Result of file selection with content for preview
+#[derive(Serialize, Clone)]
+pub struct FileSelectionWithContentResult {
+    pub path: String,
+    pub name: String,
+    pub content: String, // Base64 encoded content
+    pub mime_type: String,
+}
+
 /// Open native file dialog and return selected file path
 /// 打开系统文件对话框并返回选中的文件路径
 #[tauri::command]
@@ -813,6 +822,95 @@ pub async fn open_file_dialog(
             path: file.path().to_string_lossy().to_string(),
             name: file.file_name().to_string(),
         })),
+        None => Ok(None),
+    }
+}
+
+/// Open native file dialog and return file with content for preview
+/// 打开系统文件对话框并返回文件内容（用于前端预览）
+#[tauri::command]
+pub async fn select_file_with_content(
+    _window: tauri::Window,
+    title: &str,
+    file_type: &str, // "video" or "image"
+    filters: Option<Vec<String>>,
+) -> Result<Option<FileSelectionWithContentResult>, String> {
+    // Use rfd for native file dialog
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(title);
+
+    // Add filters based on file type
+    let extensions: Vec<&str> = match file_type {
+        "video" => vec!["mp4", "mov", "avi", "mkv", "webm", "3gp", "m4v", "wmv"],
+        "image" => vec!["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "heic"],
+        _ => vec!["*"],
+    };
+
+    if !extensions.is_empty() {
+        dialog = dialog.add_filter("Files", &extensions);
+    }
+
+    let result = dialog
+        .pick_file()
+        .await;
+
+    match result {
+        Some(file) => {
+            let path = file.path().to_string_lossy().to_string();
+            let name = file.file_name().to_string();
+
+            // Read file content
+            let bytes = tokio::fs::read(&path).await
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+
+            // Determine mime type
+            let mime_type = match file_type {
+                "video" => {
+                    let ext = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    match ext.to_lowercase().as_str() {
+                        "mp4" => "video/mp4",
+                        "mov" => "video/quicktime",
+                        "avi" => "video/x-msvideo",
+                        "mkv" => "video/x-matroska",
+                        "webm" => "video/webm",
+                        "3gp" => "video/3gpp",
+                        "m4v" => "video/x-m4v",
+                        "wmv" => "video/x-ms-wmv",
+                        _ => "application/octet-stream",
+                    }.to_string()
+                }
+                "image" => {
+                    let ext = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    match ext.to_lowercase().as_str() {
+                        "png" => "image/png",
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "webp" => "image/webp",
+                        "gif" => "image/gif",
+                        "bmp" => "image/bmp",
+                        "tiff" | "tif" => "image/tiff",
+                        "heic" => "image/heic",
+                        _ => "application/octet-stream",
+                    }.to_string()
+                }
+                _ => "application/octet-stream".to_string(),
+            };
+
+            // Encode to base64
+            let content = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+
+            Ok(Some(FileSelectionWithContentResult {
+                path,
+                name,
+                content,
+                mime_type,
+            }))
+        }
         None => Ok(None),
     }
 }

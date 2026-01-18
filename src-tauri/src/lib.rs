@@ -84,6 +84,7 @@ pub fn run() {
             add_account,
             delete_account,
             open_file_dialog,
+            select_file_with_content,
             // Publication task commands (new main + sub table structure)
             get_publication_tasks,
             get_publication_task,

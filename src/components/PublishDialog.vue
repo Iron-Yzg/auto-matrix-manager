@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import Hls from 'hls.js'
-
-// 使用 URL.createObjectURL 处理本地文件
-const createObjectUrl = (file: File): string => {
-  return URL.createObjectURL(file)
-}
 
 interface Props {
   show: boolean
@@ -36,17 +32,15 @@ const emit = defineEmits<{
 // Step state
 const currentStep = ref(1)
 
-// Video file state (using File object for URL.createObjectURL)
-const selectedVideo = ref<File | null>(null)
-const videoUrl = computed(() => selectedVideo.value ? createObjectUrl(selectedVideo.value) : '')
+// Video file state
+const videoPath = ref('')
+const videoBase64 = ref('')
+const videoUrl = computed(() => videoBase64.value ? `data:video/mp4;base64,${videoBase64.value}` : '')
 
 // Cover file state
-const selectedCover = ref<File | null>(null)
-const coverUrl = computed(() => selectedCover.value ? createObjectUrl(selectedCover.value) : '')
-
-// Hidden file inputs
-const videoInputRef = ref<HTMLInputElement | null>(null)
-const coverInputRef = ref<HTMLInputElement | null>(null)
+const coverPath = ref('')
+const coverBase64 = ref('')
+const coverUrl = computed(() => coverBase64.value ? `data:image;base64,${coverBase64.value}` : '')
 
 // Video player refs
 const videoElement = ref<HTMLVideoElement | null>(null)
@@ -62,9 +56,8 @@ const selectedAccounts = ref<string[]>([])
 // Initialize video player with HLS support
 const initVideoPlayer = () => {
   const video = videoElement.value
-  if (!video || !selectedVideo.value) return
+  if (!video || !videoBase64.value) return
 
-  // Destroy existing HLS instance
   if (hls) {
     hls.destroy()
     hls = null
@@ -73,7 +66,6 @@ const initVideoPlayer = () => {
   const videoSrc = videoUrl.value
 
   if (videoSrc.endsWith('.m3u8')) {
-    // Use HLS for streaming video
     if (Hls.isSupported()) {
       hls = new Hls()
       hls.loadSource(videoSrc)
@@ -87,14 +79,12 @@ const initVideoPlayer = () => {
         }
       })
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Native HLS support (Safari)
       video.src = videoSrc
       video.addEventListener('loadedmetadata', () => {
         video.play().catch(() => {})
       })
     }
   } else {
-    // Regular video file
     video.src = videoSrc
   }
 }
@@ -107,41 +97,52 @@ const cleanupPlayer = () => {
   }
 }
 
-// Trigger file input click
-const triggerVideoInput = () => {
-  videoInputRef.value?.click()
-}
+// Trigger video file selection
+const triggerVideoInput = async () => {
+  try {
+    const result = await invoke<{ path: string; name: string; content: string; mime_type: string } | null>('select_file_with_content', {
+      title: '选择视频文件',
+      fileType: 'video',
+      filters: ['mp4,mov,avi,mkv,webm'],
+    })
 
-const triggerCoverInput = () => {
-  coverInputRef.value?.click()
-}
-
-// Handle video file selection
-const handleVideoSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement
-  if (input.files && input.files[0]) {
-    selectedVideo.value = input.files[0]
+    if (result && result.path) {
+      videoPath.value = result.path
+      videoBase64.value = result.content
+    }
+  } catch (e) {
+    console.error('Failed to select video:', e)
+    alert('选择视频失败')
   }
 }
 
-// Handle cover file selection
-const handleCoverSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement
-  if (input.files && input.files[0]) {
-    selectedCover.value = input.files[0]
+// Trigger cover file selection
+const triggerCoverInput = async () => {
+  try {
+    const result = await invoke<{ path: string; name: string; content: string; mime_type: string } | null>('select_file_with_content', {
+      title: '选择封面图片',
+      fileType: 'image',
+      filters: ['png,jpg,jpeg,webp'],
+    })
+
+    if (result && result.path) {
+      coverPath.value = result.path
+      coverBase64.value = result.content
+    }
+  } catch (e) {
+    console.error('Failed to select cover:', e)
+    alert('选择封面失败')
   }
 }
 
 // Clear cover selection
 const clearCover = () => {
-  selectedCover.value = null
-  if (coverInputRef.value) {
-    coverInputRef.value.value = ''
-  }
+  coverPath.value = ''
+  coverBase64.value = ''
 }
 
 // Watch for video changes
-watch(selectedVideo, (newVal) => {
+watch(videoBase64, (newVal) => {
   if (newVal) {
     setTimeout(initVideoPlayer, 100)
   } else {
@@ -183,7 +184,7 @@ const removeTopic = (index: number) => {
 
 // Navigation
 const nextStep = () => {
-  if (currentStep.value < 2 && selectedVideo.value) {
+  if (currentStep.value < 2 && videoPath.value) {
     currentStep.value++
   }
 }
@@ -196,7 +197,7 @@ const prevStep = () => {
 
 // Publish
 const handlePublish = () => {
-  if (!selectedVideo.value || selectedAccounts.value.length === 0) return
+  if (!videoPath.value || selectedAccounts.value.length === 0) return
 
   const platforms = selectedAccounts.value.map(accountId => {
     const account = props.accounts.find(a => a.id === accountId)
@@ -208,8 +209,8 @@ const handlePublish = () => {
   emit('publish', {
     title: title.value || '未命名视频',
     description: description.value,
-    videoPath: selectedVideo.value.name,
-    coverPath: selectedCover.value?.name || null,
+    videoPath: videoPath.value,
+    coverPath: coverPath.value || null,
     accountIds: selectedAccounts.value,
     platforms,
     hashtags,
@@ -225,15 +226,15 @@ const close = () => {
 const reset = () => {
   currentStep.value = 1
   cleanupPlayer()
-  selectedVideo.value = null
-  selectedCover.value = null
+  videoPath.value = ''
+  videoBase64.value = ''
+  coverPath.value = ''
+  coverBase64.value = ''
   title.value = ''
   description.value = ''
   topics.value = []
   newTopic.value = ''
   selectedAccounts.value = []
-  if (videoInputRef.value) videoInputRef.value.value = ''
-  if (coverInputRef.value) coverInputRef.value.value = ''
 }
 
 // Watch for show changes to reset
@@ -251,22 +252,6 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <!-- Hidden file inputs -->
-    <input
-      ref="videoInputRef"
-      type="file"
-      accept="video/*"
-      class="hidden"
-      @change="handleVideoSelect"
-    />
-    <input
-      ref="coverInputRef"
-      type="file"
-      accept="image/*"
-      class="hidden"
-      @change="handleCoverSelect"
-    />
-
     <div v-if="show" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" @click.self="close">
       <div class="bg-white rounded-2xl w-full max-w-4xl shadow-2xl max-h-[90vh] overflow-hidden flex flex-col">
         <!-- Header -->
@@ -306,12 +291,14 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Clear button when cover is selected (top right corner) -->
-                <button v-if="selectedCover" @click.stop="clearCover" class="absolute top-2 right-2 w-6 h-6 bg-black/50 hover:bg-black/70 rounded-full flex items-center justify-center z-20 transition-colors">
+                <button v-if="coverPath" @click.stop="clearCover" class="absolute top-2 right-2 w-6 h-6 bg-black/50 hover:bg-black/70 rounded-full flex items-center justify-center z-20 transition-colors">
                   <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
               </div>
+              <!-- Full path display -->
+              <p v-if="coverPath" class="text-xs text-slate-500 mt-1 truncate">{{ coverPath }}</p>
             </div>
 
             <!-- Video Section -->
@@ -322,7 +309,7 @@ onUnmounted(() => {
                 <video v-if="videoUrl" ref="videoElement" @click.stop class="w-full h-full" controls playsinline></video>
 
                 <!-- Empty State (点击触发选择) -->
-                <div v-if="!selectedVideo" @click="triggerVideoInput" class="text-center cursor-pointer">
+                <div v-if="!videoPath" @click="triggerVideoInput" class="text-center cursor-pointer">
                   <svg class="w-10 h-10 text-slate-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
                   </svg>
@@ -330,7 +317,7 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Reselect button (small, bottom right) -->
-                <button v-if="selectedVideo" @click.stop="triggerVideoInput" class="absolute bottom-2 right-2 px-2 py-1 bg-black/50 hover:bg-black/70 rounded text-white text-xs flex items-center gap-1 z-20 transition-colors">
+                <button v-if="videoPath" @click.stop="triggerVideoInput" class="absolute bottom-2 right-2 px-2 py-1 bg-black/50 hover:bg-black/70 rounded text-white text-xs flex items-center gap-1 z-20 transition-colors">
                   <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
@@ -338,8 +325,8 @@ onUnmounted(() => {
                 </button>
               </div>
 
-              <!-- Video name display -->
-              <p v-if="selectedVideo" class="text-xs text-slate-500 mt-1 truncate">{{ selectedVideo.name }}</p>
+              <!-- Full path display -->
+              <p v-if="videoPath" class="text-xs text-slate-500 mt-1 truncate">{{ videoPath }}</p>
             </div>
           </div>
 
@@ -413,7 +400,7 @@ onUnmounted(() => {
         <div class="px-8 py-6 border-t border-slate-100 flex items-center gap-3 flex-shrink-0">
           <button v-if="currentStep > 1" @click="prevStep" class="px-6 py-3 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">上一步</button>
           <button v-if="currentStep === 1" @click="close" class="px-6 py-3 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">取消</button>
-          <button v-if="currentStep === 1" @click="nextStep" :disabled="!selectedVideo" class="flex-1 px-6 py-3 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">下一步</button>
+          <button v-if="currentStep === 1" @click="nextStep" :disabled="!videoPath" class="flex-1 px-6 py-3 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">下一步</button>
           <button v-if="currentStep === 2" @click="handlePublish" :disabled="selectedAccounts.length === 0" class="flex-1 px-6 py-3 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">发布</button>
         </div>
       </div>
