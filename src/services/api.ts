@@ -25,6 +25,41 @@ export interface PlatformInfo {
   color: string
 }
 
+// Publication Task types (main + sub table structure)
+export interface PublicationTaskWithAccounts {
+  id: string
+  title: string
+  description: string
+  videoPath: string
+  coverPath: string
+  status: PublicationStatus
+  createdAt: string
+  publishedAt: string
+  accounts: PublicationAccountDetail[]
+}
+
+export interface PublicationAccountDetail {
+  id: string
+  publicationTaskId: string
+  accountId: string
+  platform: PlatformType
+  title: string
+  description: string
+  hashtags: string[]
+  status: PublicationStatus
+  createdAt: string
+  publishedAt: string | null
+  publishUrl: string | null
+  stats: {
+    comments: number
+    likes: number
+    favorites: number
+    shares: number
+  }
+}
+
+export type PublicationStatus = 'Draft' | 'Publishing' | 'Completed' | 'Failed'
+
 // Platform list (can be fetched from backend in the future)
 export const PLATFORMS: PlatformInfo[] = [
   { id: 'douyin', name: '抖音', icon: '/src/assets/icons/douyin.png', color: '#000000' },
@@ -111,6 +146,110 @@ export async function getPublications(
 }
 
 /**
+ * Get all publication tasks with their account details
+ */
+export async function getPublicationTasks(): Promise<PublicationTaskWithAccounts[]> {
+  try {
+    return await invoke<PublicationTaskWithAccounts[]>('get_publication_tasks')
+  } catch (error) {
+    console.error('Failed to get publication tasks:', error)
+    throw error
+  }
+}
+
+/**
+ * Get a single publication task with its account details
+ */
+export async function getPublicationTask(taskId: string): Promise<PublicationTaskWithAccounts | null> {
+  try {
+    return await invoke<PublicationTaskWithAccounts | null>('get_publication_task', { taskId })
+  } catch (error) {
+    console.error('Failed to get publication task:', error)
+    throw error
+  }
+}
+
+/**
+ * Create a publication task with account details (main + sub tables)
+ */
+export async function createPublicationTask(
+  title: string,
+  description: string,
+  videoPath: string,
+  coverPath: string | null,
+  accountIds: string[],
+  platforms: string[],
+  hashtags: string[][]
+): Promise<PublicationTaskWithAccounts> {
+  try {
+    return await invoke<PublicationTaskWithAccounts>('create_publication_task', {
+      title,
+      description,
+      videoPath,
+      coverPath,
+      accountIds,
+      platforms,
+      hashtags,
+    })
+  } catch (error) {
+    console.error('Failed to create publication task:', error)
+    throw error
+  }
+}
+
+/**
+ * Delete a publication task and all its account details
+ */
+export async function deletePublicationTask(taskId: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>('delete_publication_task', { taskId })
+  } catch (error) {
+    console.error('Failed to delete publication task:', error)
+    throw error
+  }
+}
+
+/**
+ * Legacy: Get all publications across all accounts (uses old structure)
+ */
+export async function getAllPublications(): Promise<any[]> {
+  try {
+    return await invoke<any[]>('get_publication_tasks')
+  } catch (error) {
+    console.error('Failed to get all publications:', error)
+    throw error
+  }
+}
+
+/**
+ * Legacy: Save a publication draft (uses old structure)
+ */
+export async function savePublication(
+  title: string,
+  description: string,
+  videoPath: string,
+  coverPath: string | null,
+  accountIds: string[],
+  platforms: string[],
+  hashtags: string[][]
+): Promise<PublicationTaskWithAccounts> {
+  try {
+    return await invoke<PublicationTaskWithAccounts>('create_publication_task', {
+      title,
+      description,
+      videoPath,
+      coverPath,
+      accountIds,
+      platforms,
+      hashtags,
+    })
+  } catch (error) {
+    console.error('Failed to save publication:', error)
+    throw error
+  }
+}
+
+/**
  * Publish a video
  */
 export async function publishVideo(
@@ -132,6 +271,20 @@ export async function publishVideo(
     })
   } catch (error) {
     console.error('Failed to publish video:', error)
+    throw error
+  }
+}
+
+/**
+ * Publish a saved publication
+ */
+export async function publishSavedVideo(
+  publicationId: string
+): Promise<any> {
+  try {
+    return await invoke('publish_saved_video', { publicationId })
+  } catch (error) {
+    console.error('Failed to publish saved video:', error)
     throw error
   }
 }

@@ -110,6 +110,54 @@ pub struct PublishResult {
     pub error_message: Option<String>,
 }
 
+// ============================================================================
+// Publication Task types (主表+子表结构)
+// ============================================================================
+
+/// Publication task - 主表（作品发布任务）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicationTask {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub video_path: String,
+    pub cover_path: Option<String>,
+    pub status: PublicationStatus,
+    pub created_at: String,
+    pub published_at: Option<String>,
+}
+
+/// Publication account detail - 子表（账号发布详情）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicationAccountDetail {
+    pub id: String,
+    pub publication_task_id: String,
+    pub account_id: String,
+    pub platform: PlatformType,
+    pub title: String,
+    pub description: Option<String>,
+    pub hashtags: Vec<String>,
+    pub status: PublicationStatus,
+    pub created_at: String,
+    pub published_at: Option<String>,
+    pub publish_url: Option<String>,
+    pub stats: PublicationStats,
+}
+
+/// Publication task with all account details - 包含账号详情的任务
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicationTaskWithAccounts {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub video_path: String,
+    pub cover_path: String,
+    pub status: PublicationStatus,
+    pub created_at: String,
+    pub published_at: String,
+    pub accounts: Vec<PublicationAccountDetail>,
+}
+
 /// Platform errors
 #[derive(Debug, Error)]
 pub enum PlatformError {

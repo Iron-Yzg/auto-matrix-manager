@@ -5,7 +5,7 @@ use rusqlite::{Connection, Result};
 use std::path::PathBuf;
 use crate::core::{
     UserAccount, PlatformType, AccountStatus, PlatformPublication,
-    PublicationStatus, PublicationStats,
+    PublicationStatus, PublicationStats, PublicationTask, PublicationAccountDetail,
 };
 
 /// Database manager for SQLite operations
@@ -75,26 +75,47 @@ impl DatabaseManager {
             )
         "#, [])?;
 
-        // Publications table - 作品发布记录
+        // Publication tasks table - 作品发布任务主表
         conn.execute(r#"
-            CREATE TABLE IF NOT EXISTS publications (
+            CREATE TABLE IF NOT EXISTS publication_tasks (
                 id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL,
-                platform TEXT NOT NULL,
                 title TEXT NOT NULL,
                 description TEXT,
                 video_path TEXT NOT NULL,
                 cover_path TEXT,
                 status TEXT NOT NULL DEFAULT 'draft',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                published_at TEXT
+            )
+        "#, [])?;
+
+        // Publication accounts table - 账号发布详情子表
+        conn.execute(r#"
+            CREATE TABLE IF NOT EXISTS publication_accounts (
+                id TEXT PRIMARY KEY,
+                publication_task_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                hashtags TEXT DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 published_at TEXT,
                 publish_url TEXT,
-                comments TEXT DEFAULT '0',
-                likes TEXT DEFAULT '0',
-                favorites TEXT DEFAULT '0',
-                shares TEXT DEFAULT '0',
+                comments INTEGER DEFAULT 0,
+                likes INTEGER DEFAULT 0,
+                favorites INTEGER DEFAULT 0,
+                shares INTEGER DEFAULT 0,
+                FOREIGN KEY (publication_task_id) REFERENCES publication_tasks(id) ON DELETE CASCADE,
                 FOREIGN KEY (account_id) REFERENCES accounts(id)
             )
+        "#, [])?;
+
+        // Create index for faster queries
+        conn.execute(r#"
+            CREATE INDEX IF NOT EXISTS idx_publication_accounts_task_id
+            ON publication_accounts(publication_task_id)
         "#, [])?;
 
         // Platform extractor configs table - 平台数据提取引擎配置
@@ -362,6 +383,277 @@ impl DatabaseManager {
         })?.filter_map(|r| r.ok()).collect();
 
         Ok(publications)
+    }
+
+    // ============================================================================
+    // New publication + accounts operations (主表+子表结构)
+    // ============================================================================
+
+    /// Save a publication task (main table)
+    /// 保存作品发布任务主表
+    pub fn save_publication_task(&self, task: &PublicationTask) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        conn.execute(r#"
+            INSERT OR REPLACE INTO publication_tasks (
+                id, title, description, video_path, cover_path, status, created_at, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "#, &[
+            &task.id,
+            &task.title,
+            task.description.as_ref().unwrap_or(&String::new()),
+            &task.video_path,
+            task.cover_path.as_ref().unwrap_or(&String::new()),
+            &format!("{:?}", task.status),
+            &task.created_at,
+            task.published_at.as_ref().unwrap_or(&String::new()),
+        ])?;
+
+        Ok(())
+    }
+
+    /// Save a publication account detail (sub table)
+    /// 保存作品账号详情子表
+    pub fn save_publication_account_detail(&self, detail: &PublicationAccountDetail) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        conn.execute(r#"
+            INSERT OR REPLACE INTO publication_accounts (
+                id, publication_task_id, account_id, platform, title, description,
+                hashtags, status, created_at, published_at, publish_url,
+                comments, likes, favorites, shares
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#, &[
+            &detail.id,
+            &detail.publication_task_id,
+            &detail.account_id,
+            &format!("{:?}", detail.platform),
+            &detail.title,
+            detail.description.as_ref().unwrap_or(&String::new()),
+            &serde_json::to_string(&detail.hashtags).unwrap_or("[]".to_string()),
+            &format!("{:?}", detail.status),
+            &detail.created_at,
+            detail.published_at.as_ref().unwrap_or(&String::new()),
+            detail.publish_url.as_ref().unwrap_or(&String::new()),
+            &detail.stats.comments.to_string(),
+            &detail.stats.likes.to_string(),
+            &detail.stats.favorites.to_string(),
+            &detail.stats.shares.to_string(),
+        ])?;
+
+        Ok(())
+    }
+
+    /// Save publication task with all account details (transaction)
+    /// 保存任务和所有账号详情（事务）
+    pub fn save_publication_with_accounts(
+        &self,
+        task: &PublicationTask,
+        accounts: &[PublicationAccountDetail],
+    ) -> Result<(), rusqlite::Error> {
+        let mut conn = self.get_connection()?;
+
+        // Start transaction
+        let tx = conn.transaction()?;
+
+        // Save main task
+        tx.execute(r#"
+            INSERT OR REPLACE INTO publication_tasks (
+                id, title, description, video_path, cover_path, status, created_at, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "#, &[
+            &task.id,
+            &task.title,
+            task.description.as_ref().unwrap_or(&String::new()),
+            &task.video_path,
+            task.cover_path.as_ref().unwrap_or(&String::new()),
+            &format!("{:?}", task.status),
+            &task.created_at,
+            task.published_at.as_ref().unwrap_or(&String::new()),
+        ])?;
+
+        // Save all account details
+        for detail in accounts {
+            tx.execute(r#"
+                INSERT OR REPLACE INTO publication_accounts (
+                    id, publication_task_id, account_id, platform, title, description,
+                    hashtags, status, created_at, published_at, publish_url,
+                    comments, likes, favorites, shares
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#, &[
+                &detail.id,
+                &detail.publication_task_id,
+                &detail.account_id,
+                &format!("{:?}", detail.platform),
+                &detail.title,
+                detail.description.as_ref().unwrap_or(&String::new()),
+                &serde_json::to_string(&detail.hashtags).unwrap_or("[]".to_string()),
+                &format!("{:?}", detail.status),
+                &detail.created_at,
+                detail.published_at.as_ref().unwrap_or(&String::new()),
+                detail.publish_url.as_ref().unwrap_or(&String::new()),
+                &detail.stats.comments.to_string(),
+                &detail.stats.likes.to_string(),
+                &detail.stats.favorites.to_string(),
+                &detail.stats.shares.to_string(),
+            ])?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Get publication task by ID
+    /// 根据ID获取作品发布任务
+    pub fn get_publication_task(&self, task_id: &str) -> Result<Option<PublicationTask>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM publication_tasks WHERE id = ?")?;
+
+        match stmt.query_row([task_id], |row| {
+            Ok(PublicationTask {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: Some(row.get(2)?),
+                video_path: row.get(3)?,
+                cover_path: Some(row.get(4)?),
+                status: Self::parse_publication_status(row.get::<_, String>(5)?),
+                created_at: row.get(6)?,
+                published_at: Some(row.get(7)?),
+            })
+        }) {
+            Ok(task) => Ok(Some(task)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get all publication tasks with their account details
+    /// 获取所有作品发布任务及其账号详情
+    pub fn get_all_publication_tasks(&self) -> Result<Vec<crate::core::PublicationTaskWithAccounts>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        // Get all tasks
+        let mut task_stmt = conn.prepare("SELECT * FROM publication_tasks ORDER BY created_at DESC")?;
+        let tasks: Vec<PublicationTask> = task_stmt.query_map([], |row| {
+            Ok(PublicationTask {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: Some(row.get(2)?),
+                video_path: row.get(3)?,
+                cover_path: Some(row.get(4)?),
+                status: Self::parse_publication_status(row.get::<_, String>(5)?),
+                created_at: row.get(6)?,
+                published_at: Some(row.get(7)?),
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        // Get all account details
+        let mut acc_stmt = conn.prepare("SELECT * FROM publication_accounts")?;
+        let accounts: Vec<PublicationAccountDetail> = acc_stmt.query_map([], |row| {
+            let hashtags: String = row.get(6)?;
+            let hashtags_vec: Vec<String> = serde_json::from_str(&hashtags).unwrap_or_default();
+
+            Ok(PublicationAccountDetail {
+                id: row.get(0)?,
+                publication_task_id: row.get(1)?,
+                account_id: row.get(2)?,
+                platform: Self::parse_platform(row.get::<_, String>(3)?),
+                title: row.get(4)?,
+                description: Some(row.get(5)?),
+                hashtags: hashtags_vec,
+                status: Self::parse_publication_status(row.get::<_, String>(7)?),
+                created_at: row.get(8)?,
+                published_at: Some(row.get(9)?),
+                publish_url: Some(row.get(10)?),
+                stats: PublicationStats {
+                    comments: row.get(11)?,
+                    likes: row.get(12)?,
+                    favorites: row.get(13)?,
+                    shares: row.get(14)?,
+                },
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        // Group accounts by task
+        let mut result = Vec::new();
+        for t in tasks {
+            let task_accounts: Vec<PublicationAccountDetail> = accounts.iter()
+                .filter(|a| a.publication_task_id == t.id)
+                .cloned()
+                .collect();
+
+            result.push(crate::core::PublicationTaskWithAccounts {
+                id: t.id,
+                title: t.title,
+                description: t.description.unwrap_or_default(),
+                video_path: t.video_path,
+                cover_path: t.cover_path.unwrap_or_default(),
+                status: t.status,
+                created_at: t.created_at,
+                published_at: t.published_at.unwrap_or_default(),
+                accounts: task_accounts,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Get account detail by ID
+    /// 根据ID获取账号详情
+    pub fn get_publication_account_detail(&self, detail_id: &str) -> Result<Option<PublicationAccountDetail>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM publication_accounts WHERE id = ?")?;
+
+        match stmt.query_row([detail_id], |row| {
+            let hashtags: String = row.get(6)?;
+            let hashtags_vec: Vec<String> = serde_json::from_str(&hashtags).unwrap_or_default();
+
+            Ok(PublicationAccountDetail {
+                id: row.get(0)?,
+                publication_task_id: row.get(1)?,
+                account_id: row.get(2)?,
+                platform: Self::parse_platform(row.get::<_, String>(3)?),
+                title: row.get(4)?,
+                description: Some(row.get(5)?),
+                hashtags: hashtags_vec,
+                status: Self::parse_publication_status(row.get::<_, String>(7)?),
+                created_at: row.get(8)?,
+                published_at: Some(row.get(9)?),
+                publish_url: Some(row.get(10)?),
+                stats: PublicationStats {
+                    comments: row.get(11)?,
+                    likes: row.get(12)?,
+                    favorites: row.get(13)?,
+                    shares: row.get(14)?,
+                },
+            })
+        }) {
+            Ok(detail) => Ok(Some(detail)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete publication task and all its accounts
+    /// 删除作品任务及其所有账号详情
+    pub fn delete_publication_task(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        // Delete account details first (due to FK constraint, but CASCADE should handle it)
+        conn.execute(
+            "DELETE FROM publication_accounts WHERE publication_task_id = ?",
+            [task_id],
+        )?;
+
+        // Delete task
+        let rows = conn.execute(
+            "DELETE FROM publication_tasks WHERE id = ?",
+            [task_id],
+        )?;
+
+        Ok(rows > 0)
     }
 
     // ============================================================================

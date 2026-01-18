@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import Hls from 'hls.js'
 import { PLATFORMS, type Platform } from '../types'
-import { getAccounts, toFrontendAccount } from '../services/api'
+import { getAccounts, toFrontendAccount, getPublicationTasks, createPublicationTask, deletePublicationTask } from '../services/api'
+import PublishDialog from '../components/PublishDialog.vue'
 
 const router = useRouter()
 
@@ -24,18 +24,13 @@ const platformFilter = ref<Platform | 'all'>('all')
 const statusFilter = ref<string>('all')
 
 const showPublishDialog = ref(false)
-const currentStep = ref(1)
-const selectedVideo = ref<File | null>(null)
-const selectedCover = ref<File | null>(null)
-const coverUrl = computed(() => selectedCover.value ? URL.createObjectURL(selectedCover.value) : '')
-const selectedAccounts = ref<string[]>([])
-const videoTitle = ref('')
-const videoDescription = ref('')
-const topics = ref<string[]>([])
-const newTopic = ref('')
-const videoUrl = ref('')
-const videoElement = ref<HTMLVideoElement | null>(null)
-let hls: Hls | null = null
+
+// Open publish dialog
+const openPublishDialog = () => {
+  showPublishDialog.value = true
+}
+
+// File selection state removed - now handled in PublishDialog
 
 const loadAccounts = async () => {
   try {
@@ -50,8 +45,27 @@ const loadAccounts = async () => {
 const loadPublications = async () => {
   loading.value = true
   try {
-    // TODO: Replace with actual API call when publications API is ready
-    publications.value = []
+    const tasks = await getPublicationTasks()
+    // Convert to frontend format
+    publications.value = tasks.map(task => ({
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      videoPath: task.videoPath,
+      coverPath: task.coverPath,
+      status: task.status.toLowerCase(),
+      createdAt: task.createdAt,
+      publishedAt: task.publishedAt,
+      publishedAccounts: task.accounts.map(acc => ({
+        id: acc.id,
+        accountId: acc.accountId,
+        platform: acc.platform.toLowerCase(),
+        accountName: '',
+        status: acc.status.toLowerCase(),
+        publishUrl: acc.publishUrl,
+        stats: acc.stats
+      }))
+    }))
   } catch (error) {
     console.error('Failed to load publications:', error)
     publications.value = []
@@ -93,101 +107,65 @@ const formatNumber = (num: number) => {
 }
 
 const viewDetail = (id: string) => router.push(`/publications/${id}`)
-const handleDelete = (id: string) => {
-  const index = publications.value.findIndex(p => p.id === id)
-  if (index > -1) publications.value.splice(index, 1)
-}
 
-const handleVideoSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement
-  if (input.files && input.files[0]) {
-    selectedVideo.value = input.files[0]
-    videoUrl.value = URL.createObjectURL(input.files[0])
+const handleDelete = async (id: string) => {
+  try {
+    await deletePublicationTask(id)
+    const index = publications.value.findIndex(p => p.id === id)
+    if (index > -1) publications.value.splice(index, 1)
+  } catch (error) {
+    console.error('Failed to delete publication:', error)
   }
 }
 
-const handleCoverSelect = (event: Event) => {
-  const input = event.target as HTMLInputElement
-  if (input.files && input.files[0]) {
-    selectedCover.value = input.files[0]
+// Publish dialog handlers
+const handlePublish = async (data: {
+  title: string
+  description: string
+  videoPath: string
+  coverPath: string | null
+  accountIds: string[]
+  platforms: string[]
+  hashtags: string[][]
+}) => {
+  try {
+    const task = await createPublicationTask(
+      data.title,
+      data.description,
+      data.videoPath,
+      data.coverPath,
+      data.accountIds,
+      data.platforms,
+      data.hashtags
+    )
+
+    const newPublication = {
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      videoPath: task.videoPath,
+      coverPath: task.coverPath,
+      status: task.status.toLowerCase(),
+      createdAt: task.createdAt,
+      publishedAt: task.publishedAt,
+      publishedAccounts: task.accounts.map(acc => ({
+        id: acc.id,
+        accountId: acc.accountId,
+        platform: acc.platform.toLowerCase(),
+        accountName: '',
+        status: acc.status.toLowerCase(),
+        publishUrl: acc.publishUrl,
+        stats: acc.stats
+      }))
+    }
+    publications.value.unshift(newPublication)
+    showPublishDialog.value = false
+  } catch (error) {
+    console.error('Failed to publish:', error)
+    alert('发布失败: ' + error)
   }
 }
 
-const addTopic = () => {
-  if (newTopic.value.trim() && !topics.value.includes(newTopic.value.trim())) {
-    topics.value.push(newTopic.value.trim())
-    newTopic.value = ''
-  }
-}
-
-const removeTopic = (index: number) => topics.value.splice(index, 1)
-
-const toggleAccountSelection = (accountId: string) => {
-  const index = selectedAccounts.value.indexOf(accountId)
-  if (index > -1) selectedAccounts.value.splice(index, 1)
-  else selectedAccounts.value.push(accountId)
-}
-
-const selectAllAccounts = () => {
-  selectedAccounts.value = accounts.value.filter(a => a.status === 'active').map(a => a.id)
-}
-
-const deselectAllAccounts = () => {
-  selectedAccounts.value = []
-}
-
-const allSelected = computed(() => {
-  const activeAccounts = accounts.value.filter(a => a.status === 'active')
-  return activeAccounts.length > 0 && selectedAccounts.value.length === activeAccounts.length
-})
-
-const nextStep = () => { if (currentStep.value < 2) currentStep.value++ }
-const prevStep = () => { if (currentStep.value > 1) currentStep.value-- }
-
-const openPublishDialog = () => {
-  showPublishDialog.value = true
-  currentStep.value = 1
-  selectedVideo.value = null
-  selectedCover.value = null
-  selectedAccounts.value = []
-  videoTitle.value = ''
-  videoDescription.value = ''
-  topics.value = []
-  videoUrl.value = ''
-}
-
-const handlePublish = () => {
-  if (!selectedVideo.value || selectedAccounts.value.length === 0) return
-  const newPublication = {
-    id: Date.now().toString(),
-    videoPath: selectedVideo.value.name,
-    coverPath: selectedCover.value?.name || '',
-    title: videoTitle.value || '未命名视频',
-    description: videoDescription.value,
-    status: 'publishing',
-    createdAt: new Date().toLocaleString('zh-CN'),
-    publishedAccounts: selectedAccounts.value.map(accountId => {
-      const account = accounts.value.find(a => a.id === accountId)!
-      return { id: Date.now().toString() + accountId, accountId, platform: account.platform, accountName: account.accountName, status: 'publishing', stats: { comments: 0, likes: 0, favorites: 0, shares: 0 } }
-    })
-  }
-  publications.value.unshift(newPublication)
-  showPublishDialog.value = false
-}
-
-const playHlsDemo = () => {
-  if (videoElement.value && Hls.isSupported()) {
-    hls = new Hls()
-    hls.loadSource('https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8')
-    hls.attachMedia(videoElement.value)
-  }
-}
-
-onUnmounted(() => {
-  if (hls) {
-    hls.destroy()
-  }
-})
 </script>
 
 <template>
@@ -293,156 +271,11 @@ onUnmounted(() => {
     </div>
 
     <!-- Publish Dialog -->
-    <div v-if="showPublishDialog" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" @click.self="showPublishDialog = false">
-      <div class="bg-white rounded-2xl w-full max-w-4xl shadow-2xl max-h-[90vh] overflow-hidden flex flex-col">
-        <!-- Dialog Header -->
-        <div class="px-8 py-6 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
-          <div class="flex items-center gap-4">
-            <div class="flex items-center gap-2">
-              <span :class="['w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium', currentStep >= 1 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400']">1</span>
-              <span :class="['text-sm', currentStep >= 1 ? 'text-slate-800 font-medium' : 'text-slate-400']">填写信息</span>
-            </div>
-            <div class="w-12 h-px bg-slate-200"></div>
-            <div class="flex items-center gap-2">
-              <span :class="['w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium', currentStep >= 2 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400']">2</span>
-              <span :class="['text-sm', currentStep >= 2 ? 'text-slate-800 font-medium' : 'text-slate-400']">选择账号</span>
-            </div>
-          </div>
-          <button @click="showPublishDialog = false" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 transition-colors">
-            <svg class="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <!-- Step 1: Cover & Video Side by Side -->
-        <div v-if="currentStep === 1" class="p-6 overflow-y-auto flex-1">
-          <!-- Cover & Video Row -->
-          <div class="flex gap-4 mb-4">
-            <!-- Cover -->
-            <div class="w-1/2">
-              <label class="block text-sm font-semibold text-slate-700 mb-2">视频封面</label>
-              <div class="aspect-video rounded-xl bg-slate-100 border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden relative group">
-                <img v-if="selectedCover" :src="coverUrl" class="w-full h-full object-cover" />
-                <div v-else class="text-center">
-                  <svg class="w-8 h-8 text-slate-400 mx-auto mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                  <p class="text-xs text-slate-400">选择封面</p>
-                </div>
-                <input type="file" accept="image/*" @change="handleCoverSelect" class="hidden" id="cover-input" />
-                <label for="cover-input" class="absolute inset-0 cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity">
-                </label>
-              </div>
-            </div>
-
-            <!-- Video -->
-            <div class="w-1/2">
-              <label class="block text-sm font-semibold text-slate-700 mb-2">选择视频</label>
-              <div class="aspect-video rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden relative group">
-                <video v-if="videoUrl" ref="videoElement" class="w-full h-full" controls>
-                  <source :src="videoUrl" type="video/mp4" />
-                </video>
-                <div v-else class="text-center">
-                  <svg class="w-10 h-10 text-slate-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
-                  </svg>
-                  <p class="text-xs text-slate-400 mb-2">支持 MP4, MOV 格式</p>
-                  <button @click="playHlsDemo" class="text-xs text-indigo-400 hover:text-indigo-300">播放 HLS 示例</button>
-                </div>
-                <input type="file" accept="video/*" @change="handleVideoSelect" class="hidden" id="video-input" />
-                <label for="video-input" class="absolute inset-0 cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity">
-                </label>
-              </div>
-              <p v-if="selectedVideo" class="text-xs text-slate-500 mt-1 truncate">{{ selectedVideo.name }}</p>
-            </div>
-          </div>
-
-          <!-- Title -->
-          <div class="mb-4">
-            <label class="block text-sm font-semibold text-slate-700 mb-2">作品标题</label>
-            <input v-model="videoTitle" type="text" placeholder="输入作品标题" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:bg-white" />
-          </div>
-
-          <!-- Description -->
-          <div class="mb-4">
-            <label class="block text-sm font-semibold text-slate-700 mb-2">作品描述</label>
-            <textarea v-model="videoDescription" rows="3" placeholder="输入作品描述" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:bg-white resize-none"></textarea>
-          </div>
-
-          <!-- Topics -->
-          <div>
-            <label class="block text-sm font-semibold text-slate-700 mb-2">话题标签</label>
-            <div class="flex flex-wrap gap-2 mb-2">
-              <span v-for="(topic, idx) in topics" :key="idx" class="inline-flex items-center gap-1 px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-sm">
-                #{{ topic }}
-                <button @click="removeTopic(idx)" class="w-4 h-4 flex items-center justify-center hover:text-indigo-800">
-                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </span>
-            </div>
-            <div class="flex gap-2">
-              <input v-model="newTopic" type="text" placeholder="添加话题" @keyup.enter="addTopic" class="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:bg-white" />
-              <button @click="addTopic" class="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors">添加</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Step 2: Account List -->
-        <div v-if="currentStep === 2" class="overflow-hidden flex flex-col">
-          <div class="px-6 pt-6 pb-2 flex items-center gap-2">
-            <input type="checkbox" :checked="allSelected" @change="allSelected ? deselectAllAccounts() : selectAllAccounts()" class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500" />
-            <span class="text-sm font-medium text-slate-700">全选</span>
-          </div>
-          <div class="overflow-y-auto flex-1 px-6 pb-6">
-            <table class="w-full">
-              <thead class="bg-slate-50 border-b border-slate-200 sticky top-0">
-                <tr>
-                  <th class="w-10 px-2 py-2"></th>
-                  <th class="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">平台</th>
-                  <th class="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">账号名称</th>
-                  <th class="text-left px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">状态</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-slate-100">
-                <tr v-for="account in accounts.filter(a => a.status === 'active')" :key="account.id" class="hover:bg-slate-50/80 transition-colors">
-                  <td class="px-2 py-3">
-                    <input type="checkbox" :checked="selectedAccounts.includes(account.id)" @change="toggleAccountSelection(account.id)" class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500" />
-                  </td>
-                  <td class="px-4 py-3">
-                    <div class="flex items-center gap-2">
-                      <div class="w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center">
-                        <img :src="getPlatformInfo(account.platform).icon" :alt="account.accountName" class="w-4 h-4 object-contain" />
-                      </div>
-                      <span class="text-sm text-slate-600">{{ getPlatformInfo(account.platform).name }}</span>
-                    </div>
-                  </td>
-                  <td class="px-4 py-3 text-sm text-slate-700">{{ account.accountName }}</td>
-                  <td class="px-4 py-3">
-                    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600">
-                      <span class="w-1 h-1 rounded-full bg-emerald-500"></span>
-                      已授权
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <p v-if="accounts.filter(a => a.status === 'active').length === 0" class="text-center py-8 text-sm text-slate-400">
-              暂无已授权账号，请先添加账号
-            </p>
-          </div>
-        </div>
-
-        <!-- Dialog Actions -->
-        <div class="px-8 py-6 border-t border-slate-100 flex gap-3 flex-shrink-0">
-          <button v-if="currentStep > 1" @click="prevStep" class="px-6 py-3 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">上一步</button>
-          <button v-if="currentStep === 1" @click="showPublishDialog = false" class="px-6 py-3 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">取消</button>
-          <button v-if="currentStep === 1" @click="nextStep" :disabled="!selectedVideo" class="flex-1 px-6 py-3 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">下一步</button>
-          <button v-if="currentStep === 2" @click="handlePublish" :disabled="selectedAccounts.length === 0" class="flex-1 px-6 py-3 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">发布</button>
-        </div>
-      </div>
-    </div>
+    <PublishDialog
+      :show="showPublishDialog"
+      :accounts="accounts"
+      @close="showPublishDialog = false"
+      @publish="handlePublish"
+    />
   </div>
 </template>

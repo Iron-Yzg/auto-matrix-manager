@@ -37,6 +37,39 @@ export interface Publication {
   publishedAccounts: PublishedAccount[]
 }
 
+// New v2 publication structure (main table + sub table)
+export interface PublicationWithAccounts {
+  id: string
+  title: string
+  description: string
+  videoPath: string
+  coverPath: string | null
+  status: 'draft' | 'publishing' | 'completed' | 'failed'
+  createdAt: string
+  publishedAt: string | null
+  accounts: PublicationAccountDetail[]
+}
+
+export interface PublicationAccountDetail {
+  id: string
+  publicationId: string
+  accountId: string
+  platform: Platform
+  title: string
+  description: string
+  hashtags: string[]
+  status: 'draft' | 'publishing' | 'completed' | 'failed'
+  createdAt: string
+  publishedAt: string | null
+  publishUrl: string | null
+  stats: {
+    comments: number
+    likes: number
+    favorites: number
+    shares: number
+  }
+}
+
 export interface PublishedAccount {
   id: string
   accountId: string

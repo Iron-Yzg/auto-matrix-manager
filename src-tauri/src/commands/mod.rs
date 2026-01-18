@@ -8,6 +8,7 @@ use crate::browser::{BrowserAutomator, BrowserAuthResult, BrowserAuthStep};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use serde::Serialize;
+use crate::core::{PublicationTask, PublicationAccountDetail, PublicationTaskWithAccounts};
 
 // App state
 // 应用状态
@@ -142,15 +143,140 @@ pub fn add_account(
 
 // Publication management commands
 // 发布管理命令
+
+/// Get all publication tasks with their account details
+/// 获取所有作品发布任务及其账号详情
 #[tauri::command]
-pub fn get_publications(
-    app: AppHandle,
-    _platform: &str,
-    account_id: &str,
-) -> Result<Vec<PlatformPublication>, String> {
+pub fn get_publication_tasks(app: AppHandle) -> Result<Vec<PublicationTaskWithAccounts>, String> {
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
-    db_manager.get_publications_by_account(account_id)
+    db_manager.get_all_publication_tasks()
+        .map_err(|e| e.to_string())
+}
+
+/// Get a single publication task with its account details
+/// 获取单个作品发布任务及其账号详情
+#[tauri::command]
+pub fn get_publication_task(app: AppHandle, task_id: &str) -> Result<Option<PublicationTaskWithAccounts>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+
+    // Get the main task
+    let task = match db_manager.get_publication_task(task_id).map_err(|e| e.to_string())? {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    // Get account details
+    let task_id_clone = task.id.clone();
+    let all_tasks = db_manager.get_all_publication_tasks().map_err(|e| e.to_string())?;
+
+    // Find the task with accounts
+    for t in all_tasks {
+        if t.id == task_id_clone {
+            return Ok(Some(t));
+        }
+    }
+
+    // If no accounts found, return task with empty accounts
+    Ok(Some(PublicationTaskWithAccounts {
+        id: task.id,
+        title: task.title,
+        description: task.description.unwrap_or_default(),
+        video_path: task.video_path,
+        cover_path: task.cover_path.unwrap_or_default(),
+        status: task.status,
+        created_at: task.created_at,
+        published_at: task.published_at.unwrap_or_default(),
+        accounts: Vec::new(),
+    }))
+}
+
+/// Create a publication task with account details (main + sub tables)
+/// 创建作品发布任务（主表+子表）
+#[tauri::command]
+pub fn create_publication_task(
+    app: AppHandle,
+    title: &str,
+    description: &str,
+    video_path: &str,
+    cover_path: Option<&str>,
+    account_ids: Vec<String>,
+    platforms: Vec<String>,
+    hashtags: Vec<Vec<String>>,
+) -> Result<PublicationTaskWithAccounts, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Create main task
+    let task = PublicationTask {
+        id: task_id.clone(),
+        title: title.to_string(),
+        description: Some(description.to_string()),
+        video_path: video_path.to_string(),
+        cover_path: cover_path.map(|s| s.to_string()),
+        status: PublicationStatus::Draft,
+        created_at: now.clone(),
+        published_at: None,
+    };
+
+    // Create account details
+    let mut account_details = Vec::new();
+    for (i, account_id) in account_ids.iter().enumerate() {
+        let platform_str = platforms.get(i).map(|s| s.as_str()).unwrap_or("douyin");
+        let platform_type = match platform_str {
+            "douyin" => PlatformType::Douyin,
+            "xiaohongshu" => PlatformType::Xiaohongshu,
+            "kuaishou" => PlatformType::Kuaishou,
+            "bilibili" => PlatformType::Bilibili,
+            _ => PlatformType::Douyin,
+        };
+
+        let detail = PublicationAccountDetail {
+            id: uuid::Uuid::new_v4().to_string(),
+            publication_task_id: task_id.clone(),
+            account_id: account_id.clone(),
+            platform: platform_type,
+            title: title.to_string(),
+            description: Some(description.to_string()),
+            hashtags: hashtags.get(i).cloned().unwrap_or_default(),
+            status: PublicationStatus::Draft,
+            created_at: now.clone(),
+            published_at: None,
+            publish_url: None,
+            stats: PublicationStats::default(),
+        };
+
+        account_details.push(detail);
+    }
+
+    // Save both main task and all account details in a transaction
+    db_manager.save_publication_with_accounts(&task, &account_details)
+        .map_err(|e| e.to_string())?;
+
+    Ok(PublicationTaskWithAccounts {
+        id: task_id,
+        title: title.to_string(),
+        description: description.to_string(),
+        video_path: video_path.to_string(),
+        cover_path: cover_path.map(|s| s.to_string()).unwrap_or_default(),
+        status: PublicationStatus::Draft,
+        created_at: now,
+        published_at: String::new(),
+        accounts: account_details,
+    })
+}
+
+/// Delete a publication task and all its account details
+/// 删除作品任务及其所有账号详情
+#[tauri::command]
+pub fn delete_publication_task(app: AppHandle, task_id: &str) -> Result<bool, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.delete_publication_task(task_id)
         .map_err(|e| e.to_string())
 }
 
@@ -201,6 +327,80 @@ pub fn publish_video(
         }
         _ => Err("Unsupported platform".to_string()),
     }
+}
+
+/// Publish a saved publication by ID
+/// 发布保存的作品
+#[tauri::command]
+pub fn publish_saved_video(
+    app: AppHandle,
+    publication_id: &str,
+) -> Result<PublishResult, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path.clone());
+
+    // Get the publication
+    let publication = match db_manager.get_publication(publication_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err("Publication not found".to_string()),
+        Err(e) => return Err(format!("Database error: {}", e)),
+    };
+
+    // Get the account
+    let _account = match db_manager.get_account(&publication.account_id) {
+        Ok(Some(acc)) => acc,
+        Ok(None) => return Err("Account not found".to_string()),
+        Err(e) => return Err(format!("Database error: {}", e)),
+    };
+
+    // Build publish request
+    let platform_str = format!("{:?}", publication.platform);
+    let request = PublishRequest {
+        account_id: publication.account_id.clone(),
+        video_path: publication.video_path.clone().into(),
+        cover_path: publication.cover_path.clone().map(|p| p.into()),
+        title: publication.title.clone(),
+        description: publication.description.clone(),
+        hashtags: vec![],
+        visibility_type: 0,
+        download_allowed: 0,
+        timeout: 0,
+    };
+
+    // Publish based on platform
+    let result = match publication.platform {
+        PlatformType::Douyin => {
+            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+            let douyin_platform = DouyinPlatform::with_storage(db_manager.clone());
+            rt.block_on(async {
+                douyin_platform.publish_video(request).await
+            })
+            .map_err(|e| e.to_string())?
+        }
+        _ => return Err(format!("Unsupported platform: {}", platform_str)),
+    };
+
+    // Update publication status
+    let item_id = result.item_id.clone();
+    let updated_publication = PlatformPublication {
+        id: publication.id,
+        account_id: publication.account_id,
+        platform: publication.platform,
+        title: publication.title,
+        description: publication.description,
+        video_path: publication.video_path,
+        cover_path: publication.cover_path,
+        status: if result.success { PublicationStatus::Completed } else { PublicationStatus::Failed },
+        created_at: publication.created_at,
+        published_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        publish_url: item_id.map(|id| format!("https://v.douyin.com/{}", id)),
+        stats: PublicationStats::default(),
+    };
+
+    db_manager.save_publication(&updated_publication)
+        .map_err(|e| e.to_string())?;
+
+    Ok(result)
 }
 
 // ============================================================================
@@ -545,3 +745,75 @@ pub fn save_extractor_config(
 
     Ok(true)
 }
+
+// ============================================================================
+// File selection commands
+// 文件选择命令
+// ============================================================================
+
+/// Select a file and return its path
+/// 选择文件并返回路径
+#[tauri::command]
+pub fn select_file(
+    _app: AppHandle,
+    title: &str,
+    filter_extensions: Option<Vec<&str>>,
+) -> Result<Option<String>, String> {
+    // Since we can't use tauri::api::dialog directly in commands,
+    // we'll return the filter info for frontend to handle
+    // Or we can use webview window to open dialog
+    let extensions = filter_extensions.unwrap_or_default();
+    Ok(Some(format!(
+        "FILE_DIALOG:{}:{}",
+        title,
+        extensions.join(",")
+    )))
+}
+
+/// Result of file selection
+#[derive(Serialize, Clone)]
+pub struct FileSelectionResult {
+    pub path: String,
+    pub name: String,
+}
+
+/// Open native file dialog and return selected file path
+/// 打开系统文件对话框并返回选中的文件路径
+#[tauri::command]
+pub async fn open_file_dialog(
+    _window: tauri::Window,
+    title: &str,
+    _multiple: bool,
+    filters: Option<Vec<String>>,
+) -> Result<Option<FileSelectionResult>, String> {
+    // Use rfd for native file dialog
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(title);
+
+    // Add filters
+    if let Some(filters_str) = filters {
+        let extensions: Vec<&str> = filters_str
+            .iter()
+            .flat_map(|f| f.split(','))
+            .map(|s| s.trim().trim_start_matches('.'))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !extensions.is_empty() {
+            dialog = dialog.add_filter("Files", &extensions);
+        }
+    }
+
+    // Single file selection for now
+    let result = dialog
+        .pick_file()
+        .await;
+
+    match result {
+        Some(file) => Ok(Some(FileSelectionResult {
+            path: file.path().to_string_lossy().to_string(),
+            name: file.file_name().to_string(),
+        })),
+        None => Ok(None),
+    }
+}
+
