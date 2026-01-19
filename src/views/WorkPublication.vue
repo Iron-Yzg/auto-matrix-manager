@@ -2,7 +2,8 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { PLATFORMS, type Platform } from '../types'
-import { getAccounts, toFrontendAccount, getPublicationTasks, createPublicationTask, deletePublicationTask } from '../services/api'
+import { getAllAccounts, toFrontendAccount, getPublicationTasks, createPublicationTask, deletePublicationTask, publishPublicationTask } from '../services/api'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import PublishDialog from '../components/PublishDialog.vue'
 
 const router = useRouter()
@@ -18,6 +19,7 @@ const accounts = ref<Array<{
 
 const publications = ref<any[]>([])
 const loading = ref(false)
+const publishingIds = ref<Set<string>>(new Set())
 
 const searchQuery = ref('')
 const platformFilter = ref<Platform | 'all'>('all')
@@ -30,39 +32,61 @@ const openPublishDialog = () => {
   showPublishDialog.value = true
 }
 
-// File selection state removed - now handled in PublishDialog
-
 const loadAccounts = async () => {
   try {
-    const backendAccounts = await getAccounts('douyin')
+    // Load all accounts from all platforms
+    const backendAccounts = await getAllAccounts()
     accounts.value = backendAccounts.map(toFrontendAccount)
+    console.log('[Debug] Loaded accounts:', accounts.value.length, 'accounts')
   } catch (error) {
     console.error('Failed to load accounts:', error)
     accounts.value = []
   }
 }
 
+// Convert local file path to URL for display (Tauri 2.0)
+const getLocalFileUrl = (coverPath: string | null, videoPath?: string) => {
+  if (!coverPath) return ''
+
+  let fullPath = coverPath
+
+  // 如果 cover_path 只是文件名（不包含路径），尝试从 videoPath 推断完整路径
+  if (!coverPath.includes('/') && videoPath) {
+    const lastSlash = videoPath.lastIndexOf('/')
+    if (lastSlash > 0) {
+      const dirPath = videoPath.substring(0, lastSlash + 1)
+      fullPath = dirPath + coverPath
+    }
+  }
+
+  // 使用 convertFileSrc
+  const url = convertFileSrc(fullPath)
+  console.log('[Cover] convertFileSrc result:', { fullPath, url })
+  return url
+}
+
 const loadPublications = async () => {
   loading.value = true
   try {
     const tasks = await getPublicationTasks()
-    // Convert to frontend format
-    publications.value = tasks.map(task => ({
+    // Convert to frontend format (后端返回 snake_case，需要使用 any 绕过类型检查)
+    publications.value = tasks.map((task: any) => ({
       id: task.id,
       title: task.title,
       description: task.description,
-      videoPath: task.videoPath,
-      coverPath: task.coverPath,
+      videoPath: task.video_path,
+      coverPath: task.cover_path,
+      hashtags: task.hashtags,
       status: task.status.toLowerCase(),
-      createdAt: task.createdAt,
-      publishedAt: task.publishedAt,
-      publishedAccounts: task.accounts.map(acc => ({
+      createdAt: task.created_at,
+      publishedAt: task.published_at,
+      publishedAccounts: task.accounts.map((acc: any) => ({
         id: acc.id,
-        accountId: acc.accountId,
+        accountId: acc.account_id,
         platform: acc.platform.toLowerCase(),
-        accountName: '',
+        accountName: acc.account_name,
         status: acc.status.toLowerCase(),
-        publishUrl: acc.publishUrl,
+        publishUrl: acc.publish_url,
         stats: acc.stats
       }))
     }))
@@ -83,7 +107,7 @@ const filteredPublications = computed(() => {
   return publications.value.filter(pub => {
     const matchesSearch = pub.title?.toLowerCase().includes(searchQuery.value.toLowerCase()) ||
                           pub.description?.toLowerCase().includes(searchQuery.value.toLowerCase())
-    const matchesPlatform = platformFilter.value === 'all' || pub.platform === platformFilter.value
+    const matchesPlatform = platformFilter.value === 'all' || pub.publishedAccounts?.some((pa: any) => pa.platform === platformFilter.value)
     const matchesStatus = statusFilter.value === 'all' || pub.status === statusFilter.value
     return matchesSearch && matchesPlatform && matchesStatus
   })
@@ -106,6 +130,22 @@ const formatNumber = (num: number) => {
   return num.toString()
 }
 
+const formatTime = (time: string) => {
+  if (!time) return '-'
+  try {
+    const date = new Date(time)
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  } catch {
+    return time
+  }
+}
+
 const viewDetail = (id: string) => router.push(`/publications/${id}`)
 
 const handleDelete = async (id: string) => {
@@ -115,6 +155,32 @@ const handleDelete = async (id: string) => {
     if (index > -1) publications.value.splice(index, 1)
   } catch (error) {
     console.error('Failed to delete publication:', error)
+  }
+}
+
+const handlePublishTask = async (id: string) => {
+  const pub = publications.value.find(p => p.id === id)
+  if (!pub) return
+
+  console.log('[Publish] Starting publish for task:', id)
+  publishingIds.value.add(id)
+  try {
+    console.log('[Publish] Calling publishPublicationTask...')
+    const result = await publishPublicationTask(
+      id,
+      pub.title,
+      pub.description || '',
+      pub.videoPath,
+      pub.hashtags || []
+    )
+    console.log('[Publish] Publish result:', result)
+    // Reload to get updated status
+    await loadPublications()
+  } catch (error) {
+    console.error('[Publish] Failed to publish task:', error)
+    alert('发布失败: ' + error)
+  } finally {
+    publishingIds.value.delete(id)
   }
 }
 
@@ -139,22 +205,24 @@ const handlePublish = async (data: {
       data.hashtags
     )
 
-    const newPublication = {
-      id: task.id,
-      title: task.title,
-      description: task.description,
-      videoPath: task.videoPath,
-      coverPath: task.coverPath,
-      status: task.status.toLowerCase(),
-      createdAt: task.createdAt,
-      publishedAt: task.publishedAt,
-      publishedAccounts: task.accounts.map(acc => ({
+    // 后端返回 snake_case，需要使用 any 绕过类型检查
+    const newPublication: any = {
+      id: (task as any).id,
+      title: (task as any).title,
+      description: (task as any).description,
+      videoPath: (task as any).video_path,
+      coverPath: (task as any).cover_path,
+      hashtags: (task as any).hashtags,
+      status: (task as any).status.toLowerCase(),
+      createdAt: (task as any).created_at,
+      publishedAt: (task as any).published_at,
+      publishedAccounts: (task as any).accounts.map((acc: any) => ({
         id: acc.id,
-        accountId: acc.accountId,
+        accountId: acc.account_id,
         platform: acc.platform.toLowerCase(),
-        accountName: '',
+        accountName: acc.account_name,
         status: acc.status.toLowerCase(),
-        publishUrl: acc.publishUrl,
+        publishUrl: acc.publish_url,
         stats: acc.stats
       }))
     }
@@ -220,8 +288,9 @@ const handlePublish = async (data: {
             <tr v-for="pub in filteredPublications" :key="pub.id" class="hover:bg-slate-50/80 transition-colors">
               <td class="px-6 py-3">
                 <div class="flex items-center gap-3">
-                  <div class="w-16 h-10 rounded-lg bg-slate-100 flex items-center justify-center overflow-hidden flex-shrink-0">
-                    <svg class="w-5 h-5 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <div class="w-16 h-10 rounded-lg bg-slate-100 flex items-center justify-center overflow-hidden flex-shrink-0 flex-shrink-0">
+                    <img v-if="pub.coverPath" :src="getLocalFileUrl(pub.coverPath, pub.videoPath)" alt="封面" class="w-full h-full object-cover" />
+                    <svg v-else class="w-5 h-5 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
                     </svg>
                   </div>
@@ -246,9 +315,17 @@ const handlePublish = async (data: {
               </td>
               <td class="px-6 py-3 text-sm text-slate-600">{{ formatNumber((pub.publishedAccounts || []).reduce((sum: number, pa: any) => sum + (pa.stats?.comments || 0), 0)) }}</td>
               <td class="px-6 py-3 text-sm text-slate-600">{{ formatNumber((pub.publishedAccounts || []).reduce((sum: number, pa: any) => sum + (pa.stats?.likes || 0), 0)) }}</td>
-              <td class="px-6 py-3 text-sm text-slate-500">{{ pub.createdAt }}</td>
+              <td class="px-6 py-3 text-sm text-slate-500">{{ formatTime(pub.createdAt) }}</td>
               <td class="px-6 py-3">
                 <div class="flex items-center justify-end gap-2">
+                  <button
+                    v-if="pub.status === 'draft'"
+                    @click="handlePublishTask(pub.id)"
+                    :disabled="publishingIds.has(pub.id)"
+                    class="px-3 py-1.5 text-xs font-medium text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {{ publishingIds.has(pub.id) ? '发布中...' : '发布' }}
+                  </button>
                   <button @click="viewDetail(pub.id)" class="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors">详情</button>
                   <button @click="handleDelete(pub.id)" class="px-3 py-1.5 text-xs font-medium text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors">删除</button>
                 </div>

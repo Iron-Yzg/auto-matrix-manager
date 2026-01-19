@@ -88,6 +88,16 @@ pub fn get_accounts(
         .map_err(|e| e.to_string())
 }
 
+/// Get all accounts across all platforms
+/// 获取所有平台的账号
+#[tauri::command]
+pub fn get_all_accounts(app: AppHandle) -> Result<Vec<UserAccount>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_all_accounts()
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn delete_account(
     app: AppHandle,
@@ -185,6 +195,7 @@ pub fn get_publication_task(app: AppHandle, task_id: &str) -> Result<Option<Publ
         description: task.description.unwrap_or_default(),
         video_path: task.video_path,
         cover_path: task.cover_path.unwrap_or_default(),
+        hashtags: task.hashtags,
         status: task.status,
         created_at: task.created_at,
         published_at: task.published_at.unwrap_or_default(),
@@ -211,19 +222,22 @@ pub fn create_publication_task(
     let task_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    // Create main task
+    // Create main task (flatten hashtags from Vec<Vec<String>> to Vec<String>)
+    let hashtags: Vec<String> = hashtags.into_iter().flatten().collect();
     let task = PublicationTask {
         id: task_id.clone(),
         title: title.to_string(),
         description: Some(description.to_string()),
         video_path: video_path.to_string(),
         cover_path: cover_path.map(|s| s.to_string()),
+        hashtags,
         status: PublicationStatus::Draft,
         created_at: now.clone(),
         published_at: None,
     };
 
-    // Create account details
+    // Create account details (only store account info, title/description/hashtags are in main table)
+    // 冗余 account_name 字段便于直接显示
     let mut account_details = Vec::new();
     for (i, account_id) in account_ids.iter().enumerate() {
         let platform_str = platforms.get(i).map(|s| s.as_str()).unwrap_or("douyin");
@@ -235,14 +249,18 @@ pub fn create_publication_task(
             _ => PlatformType::Douyin,
         };
 
+        // Get account name from database for redundancy
+        let account_name = match db_manager.get_account(account_id).map_err(|e| e.to_string())? {
+            Some(acc) => acc.nickname.clone(),
+            None => format!("账号{}", &account_id[..8]),
+        };
+
         let detail = PublicationAccountDetail {
             id: uuid::Uuid::new_v4().to_string(),
             publication_task_id: task_id.clone(),
             account_id: account_id.clone(),
+            account_name,  // 冗余的账号名称
             platform: platform_type,
-            title: title.to_string(),
-            description: Some(description.to_string()),
-            hashtags: hashtags.get(i).cloned().unwrap_or_default(),
             status: PublicationStatus::Draft,
             created_at: now.clone(),
             published_at: None,
@@ -263,6 +281,7 @@ pub fn create_publication_task(
         description: description.to_string(),
         video_path: video_path.to_string(),
         cover_path: cover_path.map(|s| s.to_string()).unwrap_or_default(),
+        hashtags: task.hashtags,
         status: PublicationStatus::Draft,
         created_at: now,
         published_at: String::new(),
@@ -278,6 +297,174 @@ pub fn delete_publication_task(app: AppHandle, task_id: &str) -> Result<bool, St
     let db_manager = DatabaseManager::new(data_path);
     db_manager.delete_publication_task(task_id)
         .map_err(|e| e.to_string())
+}
+
+/// Get a publication task with all account details
+/// 获取作品任务及其所有账号详情
+#[tauri::command]
+pub fn get_publication_task_with_accounts(app: AppHandle, task_id: &str) -> Result<Option<PublicationTaskWithAccounts>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_publication_task_with_accounts(task_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get a single publication account detail by ID
+/// 根据ID获取单个作品账号发布详情
+#[tauri::command]
+pub fn get_publication_account_detail(app: AppHandle, detail_id: &str) -> Result<Option<PublicationAccountDetail>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_publication_account_detail(detail_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Result of publishing a task
+/// 发布任务结果
+#[derive(Serialize, Clone)]
+pub struct PublishTaskResult {
+    pub success: bool,
+    pub detail_id: String,
+    pub publish_url: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Publish a publication task to all accounts
+/// 发布作品到所有账号
+#[tauri::command]
+pub async fn publish_publication_task(
+    app: AppHandle,
+    task_id: &str,
+    title: &str,
+    description: &str,
+    video_path: &str,
+    hashtags: Vec<String>,
+) -> Result<Vec<PublishTaskResult>, String> {
+    eprintln!("[Publish] Starting publish for task: {}", task_id);
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path.clone());
+
+    // Get the task with accounts
+    let task = match db_manager.get_publication_task_with_accounts(task_id).map_err(|e| e.to_string())? {
+        Some(t) => t,
+        None => {
+            eprintln!("[Publish] Task not found: {}", task_id);
+            return Err("Task not found".to_string());
+        }
+    };
+    eprintln!("[Publish] Found task with {} accounts", task.accounts.len());
+
+    // Get main task for video path and title
+    let main_task = match db_manager.get_publication_task(task_id).map_err(|e| e.to_string())? {
+        Some(t) => t,
+        None => return Err("Task not found".to_string()),
+    };
+
+    let mut results = Vec::new();
+
+    // Publish to each account
+    for account_detail in &task.accounts {
+        eprintln!("[Publish] Processing account: {}, platform: {:?}", account_detail.account_id, account_detail.platform);
+        // Skip if already published
+        if account_detail.status == PublicationStatus::Completed {
+            eprintln!("[Publish] Account {} already published, skipping", account_detail.account_id);
+            results.push(PublishTaskResult {
+                success: true,
+                detail_id: account_detail.id.clone(),
+                publish_url: account_detail.publish_url.clone(),
+                error: None,
+            });
+            continue;
+        }
+
+        // Get the account
+        let account = match db_manager.get_account(&account_detail.account_id).map_err(|e| e.to_string())? {
+            Some(acc) => acc,
+            None => {
+                eprintln!("[Publish] Account not found: {}", account_detail.account_id);
+                results.push(PublishTaskResult {
+                    success: false,
+                    detail_id: account_detail.id.clone(),
+                    publish_url: None,
+                    error: Some("Account not found".to_string()),
+                });
+                continue;
+            }
+        };
+
+        // Build publish request
+        let platform_str = format!("{:?}", account_detail.platform);
+        eprintln!("[Publish] Building request for platform: {}", platform_str);
+        let request = PublishRequest {
+            account_id: account_detail.account_id.clone(),
+            video_path: main_task.video_path.clone().into(),
+            cover_path: main_task.cover_path.clone().map(|p| p.into()),
+            title: main_task.title.clone(),
+            description: main_task.description.clone().unwrap_or_default(),
+            hashtags: hashtags.clone(),
+            visibility_type: 0,
+            download_allowed: 0,
+            timeout: 0,
+        };
+
+        // Publish based on platform
+        let publish_result = match account_detail.platform {
+            PlatformType::Douyin => {
+                eprintln!("[Publish] Starting Douyin publish...");
+                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                let douyin_platform = DouyinPlatform::with_storage(db_manager.clone());
+                let result = rt.block_on(async {
+                    douyin_platform.publish_video(request).await
+                });
+                match result {
+                    Ok(r) => {
+                        eprintln!("[Publish] Douyin publish success: {}", r.success);
+                        r
+                    }
+                    Err(e) => {
+                        eprintln!("[Publish] Douyin publish error: {}", e);
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            _ => {
+                results.push(PublishTaskResult {
+                    success: false,
+                    detail_id: account_detail.id.clone(),
+                    publish_url: None,
+                    error: Some(format!("Unsupported platform: {}", platform_str)),
+                });
+                continue;
+            }
+        };
+
+        // Update status
+        let publish_url = publish_result.item_id.clone()
+            .map(|id| format!("https://v.douyin.com/{}", id));
+
+        let new_status = if publish_result.success {
+            PublicationStatus::Completed
+        } else {
+            PublicationStatus::Failed
+        };
+
+        if let Err(e) = db_manager.update_publication_account_status(
+            &account_detail.id,
+            new_status,
+            publish_url.clone(),
+        ) {
+            eprintln!("Failed to update status: {}", e);
+        }
+
+        results.push(PublishTaskResult {
+            success: publish_result.success,
+            detail_id: account_detail.id.clone(),
+            publish_url,
+            error: publish_result.error_message,
+        });
+    }
+
+    Ok(results)
 }
 
 #[tauri::command]

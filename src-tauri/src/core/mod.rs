@@ -122,21 +122,22 @@ pub struct PublicationTask {
     pub description: Option<String>,
     pub video_path: String,
     pub cover_path: Option<String>,
+    pub hashtags: Vec<String>,
     pub status: PublicationStatus,
     pub created_at: String,
     pub published_at: Option<String>,
 }
 
 /// Publication account detail - 子表（账号发布详情）
+/// 注意：title/description/hashtags 只在主表存储，子表只存储关联信息和发布结果
+/// 冗余 account_name 字段便于直接显示
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicationAccountDetail {
     pub id: String,
     pub publication_task_id: String,
     pub account_id: String,
+    pub account_name: String,  // 冗余的账号名称
     pub platform: PlatformType,
-    pub title: String,
-    pub description: Option<String>,
-    pub hashtags: Vec<String>,
     pub status: PublicationStatus,
     pub created_at: String,
     pub published_at: Option<String>,
@@ -152,6 +153,7 @@ pub struct PublicationTaskWithAccounts {
     pub description: String,
     pub video_path: String,
     pub cover_path: String,
+    pub hashtags: Vec<String>,
     pub status: PublicationStatus,
     pub created_at: String,
     pub published_at: String,

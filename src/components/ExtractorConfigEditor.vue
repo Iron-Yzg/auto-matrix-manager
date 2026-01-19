@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 interface ExtractorRule {
@@ -86,7 +86,7 @@ onMounted(async () => {
     })
 
     if (result) {
-      config.value = result as ExtractorConfig
+      config.value = result as unknown as ExtractorConfig
 
       // 解析规则
       const rules = result.extract_rules as ExtractorConfig['extract_rules']
@@ -357,7 +357,7 @@ const ruleSyntaxTips = [
               </button>
             </div>
             <div class="flex flex-wrap gap-2">
-              <div v-for="(key, index) in localStorageKeys" :key="index" class="flex items-center gap-1">
+              <div v-for="(key, index) in localStorageKeys" :key="key" class="flex items-center gap-1">
                 <input
                   v-model="localStorageKeys[index]"
                   type="text"

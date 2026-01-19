@@ -29,8 +29,8 @@ const router = createRouter({
       props: true
     },
     {
-      path: '/comments',
-      name: 'comments',
+      path: '/comments/:id',
+      name: 'comment-detail',
       component: CommentDetail,
       props: true
     },

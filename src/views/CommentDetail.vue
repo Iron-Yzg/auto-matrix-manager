@@ -1,14 +1,36 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { PLATFORMS, type Platform } from '../types'
+import { getPublicationAccountDetail } from '../services/api'
 
 const route = useRoute()
 const router = useRouter()
 
-const platform = route.query.platform as Platform
-const accountName = route.query.accountName as string
+// Support both query params and route id param
+const accountId = route.params.id as string || route.query.accountId as string
+// Use accountDetail data if available, otherwise fall back to query params
+const accountNameParam = route.query.accountName as string
 
+// Load account detail if id is provided
+const accountDetail = ref<any>(null)
+const loading = ref(true)
+
+onMounted(async () => {
+  if (accountId) {
+    try {
+      const detail = await getPublicationAccountDetail(accountId)
+      if (detail) {
+        accountDetail.value = detail
+      }
+    } catch (error) {
+      console.error('Failed to load account detail:', error)
+    }
+  }
+  loading.value = false
+})
+
+// Mock comments data
 const comments = ref([
   { id: '1', username: '用户_a7x9k2', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=user1', content: '这个视频太棒了！内容很有价值，学到了很多', time: '2小时前', likes: 128, replyCount: 12 },
   { id: '2', username: '用户_m3n5p8', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=user2', content: '支持下，期待下个视频', time: '3小时前', likes: 89, replyCount: 5 },
@@ -53,8 +75,8 @@ const filteredComments = computed(() => {
           </svg>
         </button>
         <div class="flex items-center gap-2 px-3 py-1.5 bg-white rounded-full border border-slate-200 min-w-0">
-          <img :src="getPlatformInfo(platform).icon" :alt="getPlatformInfo(platform).name" class="w-4 h-4 object-contain flex-shrink-0" />
-          <span class="text-sm text-slate-600 truncate">{{ accountName }}</span>
+          <img v-if="accountDetail" :src="getPlatformInfo(accountDetail.platform?.toLowerCase() || 'douyin').icon" :alt="getPlatformInfo(accountDetail.platform?.toLowerCase() || 'douyin').name" class="w-4 h-4 object-contain flex-shrink-0" />
+          <span class="text-sm text-slate-600 truncate">{{ accountDetail?.account_name || accountNameParam || '评论详情' }}</span>
         </div>
       </div>
       <span class="text-sm text-slate-500 flex-shrink-0">共 {{ comments.length }} 条评论</span>

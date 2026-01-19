@@ -83,6 +83,7 @@ impl DatabaseManager {
                 description TEXT,
                 video_path TEXT NOT NULL,
                 cover_path TEXT,
+                hashtags TEXT DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'draft',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 published_at TEXT
@@ -90,15 +91,15 @@ impl DatabaseManager {
         "#, [])?;
 
         // Publication accounts table - 账号发布详情子表
+        // 注意：title/description/hashtags 只在主表存储，子表只存储关联信息
+        // 冗余 account_name 字段便于直接显示
         conn.execute(r#"
             CREATE TABLE IF NOT EXISTS publication_accounts (
                 id TEXT PRIMARY KEY,
                 publication_task_id TEXT NOT NULL,
                 account_id TEXT NOT NULL,
+                account_name TEXT NOT NULL,
                 platform TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT,
-                hashtags TEXT DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'draft',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 published_at TEXT,
@@ -117,6 +118,28 @@ impl DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_publication_accounts_task_id
             ON publication_accounts(publication_task_id)
         "#, [])?;
+
+        // Migration: Add account_name column if not exists
+        // 迁移：为 publication_accounts 表添加 account_name 列
+        // SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we check first
+        let table_info: Result<Vec<_>, rusqlite::Error> = conn.prepare("PRAGMA table_info(publication_accounts)")?
+            .query_map([], |row| Ok(row.get::<_, String>(1)?))?
+            .collect();
+        if let Ok(columns) = table_info {
+            if !columns.contains(&"account_name".to_string()) {
+                conn.execute_batch("ALTER TABLE publication_accounts ADD COLUMN account_name TEXT NOT NULL DEFAULT ''")?;
+            }
+            // Migration: Update existing records with account_name from accounts table
+            // 迁移：更新现有记录的 account_name 字段
+            conn.execute_batch(r#"
+                UPDATE publication_accounts
+                SET account_name = (
+                    SELECT COALESCE(nickname, username) FROM accounts
+                    WHERE accounts.id = publication_accounts.account_id
+                )
+                WHERE account_name = '' OR account_name IS NULL
+            "#)?;
+        }
 
         // Platform extractor configs table - 平台数据提取引擎配置
         conn.execute(r#"
@@ -396,14 +419,15 @@ impl DatabaseManager {
 
         conn.execute(r#"
             INSERT OR REPLACE INTO publication_tasks (
-                id, title, description, video_path, cover_path, status, created_at, published_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, title, description, video_path, cover_path, hashtags, status, created_at, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#, &[
             &task.id,
             &task.title,
             task.description.as_ref().unwrap_or(&String::new()),
             &task.video_path,
             task.cover_path.as_ref().unwrap_or(&String::new()),
+            &serde_json::to_string(&task.hashtags).unwrap_or("[]".to_string()),
             &format!("{:?}", task.status),
             &task.created_at,
             task.published_at.as_ref().unwrap_or(&String::new()),
@@ -419,18 +443,16 @@ impl DatabaseManager {
 
         conn.execute(r#"
             INSERT OR REPLACE INTO publication_accounts (
-                id, publication_task_id, account_id, platform, title, description,
-                hashtags, status, created_at, published_at, publish_url,
+                id, publication_task_id, account_id, account_name, platform, status,
+                created_at, published_at, publish_url,
                 comments, likes, favorites, shares
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#, &[
             &detail.id,
             &detail.publication_task_id,
             &detail.account_id,
+            &detail.account_name,
             &format!("{:?}", detail.platform),
-            &detail.title,
-            detail.description.as_ref().unwrap_or(&String::new()),
-            &serde_json::to_string(&detail.hashtags).unwrap_or("[]".to_string()),
             &format!("{:?}", detail.status),
             &detail.created_at,
             detail.published_at.as_ref().unwrap_or(&String::new()),
@@ -456,38 +478,37 @@ impl DatabaseManager {
         // Start transaction
         let tx = conn.transaction()?;
 
-        // Save main task
+        // Save main task (with hashtags)
         tx.execute(r#"
             INSERT OR REPLACE INTO publication_tasks (
-                id, title, description, video_path, cover_path, status, created_at, published_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, title, description, video_path, cover_path, hashtags, status, created_at, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#, &[
             &task.id,
             &task.title,
             task.description.as_ref().unwrap_or(&String::new()),
             &task.video_path,
             task.cover_path.as_ref().unwrap_or(&String::new()),
+            &serde_json::to_string(&task.hashtags).unwrap_or("[]".to_string()),
             &format!("{:?}", task.status),
             &task.created_at,
             task.published_at.as_ref().unwrap_or(&String::new()),
         ])?;
 
-        // Save all account details
+        // Save all account details (only store account info, no title/description/hashtags)
         for detail in accounts {
             tx.execute(r#"
                 INSERT OR REPLACE INTO publication_accounts (
-                    id, publication_task_id, account_id, platform, title, description,
-                    hashtags, status, created_at, published_at, publish_url,
+                    id, publication_task_id, account_id, account_name, platform, status,
+                    created_at, published_at, publish_url,
                     comments, likes, favorites, shares
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#, &[
                 &detail.id,
                 &detail.publication_task_id,
                 &detail.account_id,
+                &detail.account_name,
                 &format!("{:?}", detail.platform),
-                &detail.title,
-                detail.description.as_ref().unwrap_or(&String::new()),
-                &serde_json::to_string(&detail.hashtags).unwrap_or("[]".to_string()),
                 &format!("{:?}", detail.status),
                 &detail.created_at,
                 detail.published_at.as_ref().unwrap_or(&String::new()),
@@ -511,15 +532,18 @@ impl DatabaseManager {
         let mut stmt = conn.prepare("SELECT * FROM publication_tasks WHERE id = ?")?;
 
         match stmt.query_row([task_id], |row| {
+            let hashtags_str: String = row.get(5)?;
+            let hashtags: Vec<String> = serde_json::from_str(&hashtags_str).unwrap_or_default();
             Ok(PublicationTask {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: Some(row.get(2)?),
                 video_path: row.get(3)?,
                 cover_path: Some(row.get(4)?),
-                status: Self::parse_publication_status(row.get::<_, String>(5)?),
-                created_at: row.get(6)?,
-                published_at: Some(row.get(7)?),
+                hashtags,
+                status: Self::parse_publication_status(row.get::<_, String>(6)?),
+                created_at: row.get(7)?,
+                published_at: Some(row.get(8)?),
             })
         }) {
             Ok(task) => Ok(Some(task)),
@@ -533,55 +557,55 @@ impl DatabaseManager {
     pub fn get_all_publication_tasks(&self) -> Result<Vec<crate::core::PublicationTaskWithAccounts>, rusqlite::Error> {
         let conn = self.get_connection()?;
 
-        // Get all tasks
+        // Get all tasks with hashtags
         let mut task_stmt = conn.prepare("SELECT * FROM publication_tasks ORDER BY created_at DESC")?;
-        let tasks: Vec<PublicationTask> = task_stmt.query_map([], |row| {
-            Ok(PublicationTask {
+        let tasks: Vec<(PublicationTask, String)> = task_stmt.query_map([], |row| {
+            let hashtags_str: String = row.get(5)?;
+            let hashtags: Vec<String> = serde_json::from_str(&hashtags_str).unwrap_or_default();
+            Ok((PublicationTask {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 description: Some(row.get(2)?),
                 video_path: row.get(3)?,
                 cover_path: Some(row.get(4)?),
-                status: Self::parse_publication_status(row.get::<_, String>(5)?),
-                created_at: row.get(6)?,
-                published_at: Some(row.get(7)?),
-            })
+                hashtags,
+                status: Self::parse_publication_status(row.get::<_, String>(6)?),
+                created_at: row.get(7)?,
+                published_at: Some(row.get(8)?),
+            }, hashtags_str))
         })?.filter_map(|r| r.ok()).collect();
 
-        // Get all account details
+        // Get all account details (without title/description/hashtags)
         let mut acc_stmt = conn.prepare("SELECT * FROM publication_accounts")?;
         let accounts: Vec<PublicationAccountDetail> = acc_stmt.query_map([], |row| {
-            let hashtags: String = row.get(6)?;
-            let hashtags_vec: Vec<String> = serde_json::from_str(&hashtags).unwrap_or_default();
-
             Ok(PublicationAccountDetail {
                 id: row.get(0)?,
                 publication_task_id: row.get(1)?,
                 account_id: row.get(2)?,
-                platform: Self::parse_platform(row.get::<_, String>(3)?),
-                title: row.get(4)?,
-                description: Some(row.get(5)?),
-                hashtags: hashtags_vec,
-                status: Self::parse_publication_status(row.get::<_, String>(7)?),
-                created_at: row.get(8)?,
-                published_at: Some(row.get(9)?),
-                publish_url: Some(row.get(10)?),
+                account_name: row.get(3)?,  // 冗余的账号名称
+                platform: Self::parse_platform(row.get::<_, String>(4)?),
+                status: Self::parse_publication_status(row.get::<_, String>(5)?),
+                created_at: row.get(6)?,
+                published_at: Some(row.get(7)?),
+                publish_url: Some(row.get(8)?),
                 stats: PublicationStats {
-                    comments: row.get(11)?,
-                    likes: row.get(12)?,
-                    favorites: row.get(13)?,
-                    shares: row.get(14)?,
+                    comments: row.get(9)?,
+                    likes: row.get(10)?,
+                    favorites: row.get(11)?,
+                    shares: row.get(12)?,
                 },
             })
         })?.filter_map(|r| r.ok()).collect();
 
         // Group accounts by task
         let mut result = Vec::new();
-        for t in tasks {
+        for (t, hashtags_str) in tasks {
             let task_accounts: Vec<PublicationAccountDetail> = accounts.iter()
                 .filter(|a| a.publication_task_id == t.id)
                 .cloned()
                 .collect();
+
+            let hashtags: Vec<String> = serde_json::from_str(&hashtags_str).unwrap_or_default();
 
             result.push(crate::core::PublicationTaskWithAccounts {
                 id: t.id,
@@ -589,6 +613,7 @@ impl DatabaseManager {
                 description: t.description.unwrap_or_default(),
                 video_path: t.video_path,
                 cover_path: t.cover_path.unwrap_or_default(),
+                hashtags,
                 status: t.status,
                 created_at: t.created_at,
                 published_at: t.published_at.unwrap_or_default(),
@@ -607,26 +632,21 @@ impl DatabaseManager {
         let mut stmt = conn.prepare("SELECT * FROM publication_accounts WHERE id = ?")?;
 
         match stmt.query_row([detail_id], |row| {
-            let hashtags: String = row.get(6)?;
-            let hashtags_vec: Vec<String> = serde_json::from_str(&hashtags).unwrap_or_default();
-
             Ok(PublicationAccountDetail {
                 id: row.get(0)?,
                 publication_task_id: row.get(1)?,
                 account_id: row.get(2)?,
-                platform: Self::parse_platform(row.get::<_, String>(3)?),
-                title: row.get(4)?,
-                description: Some(row.get(5)?),
-                hashtags: hashtags_vec,
-                status: Self::parse_publication_status(row.get::<_, String>(7)?),
-                created_at: row.get(8)?,
-                published_at: Some(row.get(9)?),
-                publish_url: Some(row.get(10)?),
+                account_name: row.get(3)?,  // 冗余的账号名称
+                platform: Self::parse_platform(row.get::<_, String>(4)?),
+                status: Self::parse_publication_status(row.get::<_, String>(5)?),
+                created_at: row.get(6)?,
+                published_at: Some(row.get(7)?),
+                publish_url: Some(row.get(8)?),
                 stats: PublicationStats {
-                    comments: row.get(11)?,
-                    likes: row.get(12)?,
-                    favorites: row.get(13)?,
-                    shares: row.get(14)?,
+                    comments: row.get(9)?,
+                    likes: row.get(10)?,
+                    favorites: row.get(11)?,
+                    shares: row.get(12)?,
                 },
             })
         }) {
@@ -654,6 +674,77 @@ impl DatabaseManager {
         )?;
 
         Ok(rows > 0)
+    }
+
+    /// Update publication account detail status
+    /// 更新账号发布详情状态
+    pub fn update_publication_account_status(&self, detail_id: &str, status: PublicationStatus, publish_url: Option<String>) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        conn.execute(r#"
+            UPDATE publication_accounts
+            SET status = ?, published_at = ?, publish_url = ?
+            WHERE id = ?
+        "#, &[
+            &format!("{:?}", status),
+            &now,
+            publish_url.as_ref().unwrap_or(&String::new()),
+            detail_id,
+        ])?;
+
+        Ok(())
+    }
+
+    /// Get publication task with account details and account info
+    /// 获取作品任务及其详情，包含账号信息
+    pub fn get_publication_task_with_accounts(&self, task_id: &str) -> Result<Option<crate::core::PublicationTaskWithAccounts>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        // Get the task
+        let task = match self.get_publication_task(task_id)? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        // Get account details - use explicit column names to avoid issues with column order
+        let mut acc_stmt = conn.prepare("
+            SELECT id, publication_task_id, account_id, account_name, platform, status,
+                   created_at, published_at, publish_url, comments, likes, favorites, shares
+            FROM publication_accounts WHERE publication_task_id = ?
+        ")?;
+        let accounts: Vec<PublicationAccountDetail> = acc_stmt.query_map([task_id], |row| {
+            Ok(PublicationAccountDetail {
+                id: row.get(0)?,
+                publication_task_id: row.get(1)?,
+                account_id: row.get(2)?,
+                account_name: row.get(3)?,  // 冗余的账号名称
+                platform: Self::parse_platform(row.get::<_, String>(4)?),
+                status: Self::parse_publication_status(row.get::<_, String>(5)?),
+                created_at: row.get(6)?,
+                published_at: Some(row.get(7)?),
+                publish_url: Some(row.get(8)?),
+                stats: PublicationStats {
+                    comments: row.get(9)?,
+                    likes: row.get(10)?,
+                    favorites: row.get(11)?,
+                    shares: row.get(12)?,
+                },
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(Some(crate::core::PublicationTaskWithAccounts {
+            id: task.id,
+            title: task.title,
+            description: task.description.unwrap_or_default(),
+            video_path: task.video_path,
+            cover_path: task.cover_path.unwrap_or_default(),
+            hashtags: task.hashtags,
+            status: task.status,
+            created_at: task.created_at,
+            published_at: task.published_at.unwrap_or_default(),
+            accounts,
+        }))
     }
 
     // ============================================================================

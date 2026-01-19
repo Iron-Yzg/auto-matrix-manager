@@ -152,22 +152,38 @@ watch(videoBase64, (newVal) => {
 
 // Account selection
 const toggleAccount = (accountId: string) => {
+  console.log('[Debug] toggleAccount called:', { accountId, selectedCount: selectedAccounts.value.length })
   const index = selectedAccounts.value.indexOf(accountId)
   if (index > -1) {
     selectedAccounts.value.splice(index, 1)
   } else {
     selectedAccounts.value.push(accountId)
   }
+  console.log('[Debug] After toggle:', { selectedCount: selectedAccounts.value.length, selectedIds: selectedAccounts.value })
 }
 
-const selectAll = () => {
-  selectedAccounts.value = props.accounts
+// Check if all active accounts are selected
+const isAllSelected = computed(() => {
+  const activeIds = props.accounts
     .filter(a => a.status === 'active')
     .map(a => a.id)
-}
+  return activeIds.length > 0 && activeIds.every(id => selectedAccounts.value.includes(id))
+})
 
-const deselectAll = () => {
-  selectedAccounts.value = []
+// Check if some accounts are selected (partial selection)
+const hasPartialSelection = computed(() => {
+  return selectedAccounts.value.length > 0 && !isAllSelected.value
+})
+
+// Toggle select all
+const toggleSelectAll = () => {
+  if (isAllSelected.value) {
+    selectedAccounts.value = []
+  } else {
+    selectedAccounts.value = props.accounts
+      .filter(a => a.status === 'active')
+      .map(a => a.id)
+  }
 }
 
 // Topic management
@@ -363,35 +379,77 @@ onUnmounted(() => {
         </div>
 
         <!-- Step 2: Account Selection -->
-        <div v-if="currentStep === 2" class="p-6 overflow-y-auto flex-1">
-          <div class="flex items-center justify-between mb-4">
-            <label class="block text-sm font-semibold text-slate-700">选择发布账号</label>
-            <div class="flex gap-2">
-              <button @click="selectAll" class="text-xs text-indigo-600 hover:text-indigo-700">全选</button>
-              <span class="text-slate-300">|</span>
-              <button @click="deselectAll" class="text-xs text-slate-500 hover:text-slate-700">全不选</button>
+        <div v-if="currentStep === 2" class="overflow-y-auto flex-1">
+          <!-- Table Header with Select All Checkbox -->
+          <div class="px-6 py-3 bg-slate-50 border-b border-slate-200 sticky top-0">
+            <div class="flex items-center gap-3">
+              <label class="relative flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  :checked="selectedAccounts.length > 0"
+                  :indeterminate="hasPartialSelection"
+                  @change="toggleSelectAll"
+                  class="peer w-4 h-4 border-2 border-slate-300 rounded cursor-pointer appearance-none checked:border-indigo-600 checked:bg-indigo-600 hover:border-indigo-400 transition-colors"
+                />
+                <!-- 自定义 indeterminate 样式 -->
+                <svg v-if="hasPartialSelection" class="absolute left-0 w-4 h-4 pointer-events-none text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                  <path d="M5 12h14" stroke-linecap="round" />
+                </svg>
+                <!-- 自定义 checked 样式 -->
+                <svg v-else-if="selectedAccounts.length > 0" class="absolute left-0 w-4 h-4 pointer-events-none text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                  <path d="M4 12l6 6L20 6" stroke-linecap="round" />
+                </svg>
+              </label>
+              <span class="text-xs font-semibold text-slate-500 uppercase tracking-wider">选择发布账号</span>
+              <span class="text-xs text-slate-400">({{ selectedAccounts.length }} 个已选)</span>
             </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
-            <div v-for="account in accounts" :key="account.id"
-                 @click="account.status === 'active' && toggleAccount(account.id)"
-                 :class="['p-3 rounded-xl border-2 cursor-pointer transition-all', selectedAccounts.includes(account.id) ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-slate-300', account.status !== 'active' ? 'opacity-50 cursor-not-allowed' : '']">
-              <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center overflow-hidden">
-                  <img v-if="account.avatar" :src="account.avatar" :alt="account.accountName" class="w-full h-full object-cover" />
-                  <span v-else class="text-sm text-slate-400">{{ account.accountName.charAt(0) }}</span>
-                </div>
-                <div class="flex-1 min-w-0">
-                  <p class="text-sm font-medium text-slate-700 truncate">{{ account.accountName }}</p>
-                  <p class="text-xs text-slate-400 capitalize">{{ account.platform }}</p>
-                </div>
-                <div v-if="selectedAccounts.includes(account.id)" class="w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center">
-                  <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-                  </svg>
-                </div>
+          <!-- Account List -->
+          <div class="divide-y divide-slate-100">
+            <div
+              v-for="account in accounts"
+              :key="account.id"
+              class="flex items-center gap-4 px-6 py-3 transition-colors"
+              :class="[
+                account.status === 'active' ? 'hover:bg-slate-50 cursor-pointer' : 'opacity-50 cursor-not-allowed',
+                selectedAccounts.includes(account.id) ? 'bg-indigo-50/50' : ''
+              ]"
+              @click="account.status === 'active' && toggleAccount(account.id)"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedAccounts.includes(account.id)"
+                :disabled="account.status !== 'active'"
+                class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                @change="toggleAccount(account.id)"
+                @click.stop
+              />
+              <div class="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center overflow-hidden flex-shrink-0">
+                <img v-if="account.avatar" :src="account.avatar" :alt="account.accountName" class="w-full h-full object-cover" />
+                <span v-else class="text-sm text-slate-400">{{ account.accountName.charAt(0) }}</span>
               </div>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-slate-700 truncate">{{ account.accountName }}</p>
+                <p class="text-xs text-slate-400 capitalize">{{ account.platform }}</p>
+              </div>
+              <span
+                :class="['inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium', account.status === 'active' ? 'bg-emerald-50 text-emerald-600' : account.status === 'expired' ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600']"
+              >
+                <span :class="['w-1.5 h-1.5 rounded-full', account.status === 'active' ? 'bg-emerald-500' : account.status === 'expired' ? 'bg-rose-500' : 'bg-amber-500']"></span>
+                {{ account.status === 'active' ? '已授权' : account.status === 'expired' ? '已过期' : '待授权' }}
+              </span>
+            </div>
+
+            <!-- Empty State -->
+            <div v-if="accounts.length === 0" class="py-12 text-center">
+              <div class="w-16 h-16 mx-auto mb-3 rounded-full bg-slate-100 flex items-center justify-center">
+                <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+              </div>
+              <h3 class="text-sm font-medium text-slate-600 mb-1">暂无账号</h3>
+              <p class="text-xs text-slate-400">请先在账号管理中添加账号</p>
             </div>
           </div>
         </div>

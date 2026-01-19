@@ -32,6 +32,7 @@ export interface PublicationTaskWithAccounts {
   description: string
   videoPath: string
   coverPath: string
+  hashtags: string[]
   status: PublicationStatus
   createdAt: string
   publishedAt: string
@@ -42,10 +43,9 @@ export interface PublicationAccountDetail {
   id: string
   publicationTaskId: string
   accountId: string
+  accountName: string  // 冗余的账号名称
   platform: PlatformType
-  title: string
-  description: string
-  hashtags: string[]
+  // Note: title/description/hashtags are only in the main table now
   status: PublicationStatus
   createdAt: string
   publishedAt: string | null
@@ -56,6 +56,19 @@ export interface PublicationAccountDetail {
     favorites: number
     shares: number
   }
+}
+
+export interface PublicationTaskDetail {
+  id: string
+  title: string
+  description: string
+  videoPath: string
+  coverPath: string
+  hashtags: string[]
+  status: PublicationStatus
+  createdAt: string
+  publishedAt: string
+  accounts: PublicationAccountDetail[]
 }
 
 export type PublicationStatus = 'Draft' | 'Publishing' | 'Completed' | 'Failed'
@@ -90,6 +103,18 @@ export async function getAccounts(platform: string): Promise<UserAccount[]> {
     return await invoke<UserAccount[]>('get_accounts', { platform })
   } catch (error) {
     console.error('Failed to get accounts:', error)
+    throw error
+  }
+}
+
+/**
+ * Get all accounts across all platforms
+ */
+export async function getAllAccounts(): Promise<UserAccount[]> {
+  try {
+    return await invoke<UserAccount[]>('get_all_accounts')
+  } catch (error) {
+    console.error('Failed to get all accounts:', error)
     throw error
   }
 }
@@ -205,6 +230,65 @@ export async function deletePublicationTask(taskId: string): Promise<boolean> {
     return await invoke<boolean>('delete_publication_task', { taskId })
   } catch (error) {
     console.error('Failed to delete publication task:', error)
+    throw error
+  }
+}
+
+/**
+ * Get a publication task with all account details by ID
+ */
+export async function getPublicationTaskWithAccounts(taskId: string): Promise<PublicationTaskDetail | null> {
+  try {
+    return await invoke<PublicationTaskDetail | null>('get_publication_task_with_accounts', { taskId })
+  } catch (error) {
+    console.error('Failed to get publication task with accounts:', error)
+    throw error
+  }
+}
+
+/**
+ * Get a single publication account detail by ID
+ * 根据ID获取单个作品账号发布详情
+ */
+export async function getPublicationAccountDetail(detailId: string): Promise<PublicationAccountDetail | null> {
+  try {
+    return await invoke<PublicationAccountDetail | null>('get_publication_account_detail', { detailId })
+  } catch (error) {
+    console.error('Failed to get publication account detail:', error)
+    throw error
+  }
+}
+
+/**
+ * Result of publishing a task
+ */
+export interface PublishTaskResult {
+  success: boolean
+  detailId: string
+  publishUrl: string | null
+  error: string | null
+}
+
+/**
+ * Publish a publication task to all accounts
+ */
+export async function publishPublicationTask(
+  taskId: string,
+  title: string,
+  description: string,
+  videoPath: string,
+  hashtags: string[]
+): Promise<PublishTaskResult[]> {
+  try {
+    return await invoke<PublishTaskResult[]>('publish_publication_task', {
+      task_id: taskId,
+      title,
+      description,
+      video_path: videoPath,
+      hashtags,
+    })
+  } catch (error) {
+    console.error('Failed to publish task:', error)
     throw error
   }
 }
