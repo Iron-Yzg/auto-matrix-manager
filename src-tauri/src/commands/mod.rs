@@ -411,19 +411,23 @@ pub async fn publish_publication_task(
         let publish_result = match account_detail.platform {
             PlatformType::Douyin => {
                 eprintln!("[Publish] Starting Douyin publish...");
-                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                 let douyin_platform = DouyinPlatform::with_storage(db_manager.clone());
-                let result = rt.block_on(async {
-                    douyin_platform.publish_video(request).await
-                });
-                match result {
+                // 注意：直接使用 .await，不需要手动创建 runtime
+                // 因为 publish_publication_task 本身是 async 函数，已经在 runtime 中
+                match douyin_platform.publish_video(request).await {
                     Ok(r) => {
                         eprintln!("[Publish] Douyin publish success: {}", r.success);
                         r
                     }
                     Err(e) => {
                         eprintln!("[Publish] Douyin publish error: {}", e);
-                        return Err(e.to_string());
+                        results.push(PublishTaskResult {
+                            success: false,
+                            detail_id: account_detail.id.clone(),
+                            publish_url: None,
+                            error: Some(e.to_string()),
+                        });
+                        continue;
                     }
                 }
             }

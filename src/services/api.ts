@@ -280,11 +280,12 @@ export async function publishPublicationTask(
   hashtags: string[]
 ): Promise<PublishTaskResult[]> {
   try {
+    // 注意：使用 camelCase 参数名，Tauri 2.x 会自动转换为 Rust 的 snake_case
     return await invoke<PublishTaskResult[]>('publish_publication_task', {
-      task_id: taskId,
+      taskId,
       title,
       description,
-      video_path: videoPath,
+      videoPath,
       hashtags,
     })
   } catch (error) {

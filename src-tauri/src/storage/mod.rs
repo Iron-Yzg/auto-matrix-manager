@@ -93,6 +93,7 @@ impl DatabaseManager {
         // Publication accounts table - 账号发布详情子表
         // 注意：title/description/hashtags 只在主表存储，子表只存储关联信息
         // 冗余 account_name 字段便于直接显示
+        // 注意：移除了外键约束，允许独立管理
         conn.execute(r#"
             CREATE TABLE IF NOT EXISTS publication_accounts (
                 id TEXT PRIMARY KEY,
@@ -107,9 +108,7 @@ impl DatabaseManager {
                 comments INTEGER DEFAULT 0,
                 likes INTEGER DEFAULT 0,
                 favorites INTEGER DEFAULT 0,
-                shares INTEGER DEFAULT 0,
-                FOREIGN KEY (publication_task_id) REFERENCES publication_tasks(id) ON DELETE CASCADE,
-                FOREIGN KEY (account_id) REFERENCES accounts(id)
+                shares INTEGER DEFAULT 0
             )
         "#, [])?;
 
@@ -261,7 +260,7 @@ impl DatabaseManager {
     }
 
     /// Delete account
-    /// 删除账号
+    /// 删除账号（已移除外键约束，可直接删除）
     pub fn delete_account(&self, account_id: &str) -> Result<bool, rusqlite::Error> {
         let conn = self.get_connection()?;
 

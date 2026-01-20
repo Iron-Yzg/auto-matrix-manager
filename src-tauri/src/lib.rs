@@ -19,6 +19,16 @@ pub use commands::AppState;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+// Initialize tracing for logging
+// 初始化 tracing 用于日志输出
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_thread_ids(true)
+        .with_target(false)
+        .init();
+}
+
 // Run the Tauri application
 // 运行 Tauri 应用
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -31,6 +41,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // 初始化 tracing
+            init_tracing();
+            tracing::info!("[App] 应用启动");
             // 使用 Tauri 的应用数据目录
             let data_path = app.path()
                 .app_data_dir()

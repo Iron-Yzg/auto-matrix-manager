@@ -1,114 +1,85 @@
-// 抖音平台模块
-// Douyin Platform Module
-//
-// 本模块提供抖音(抖音创作服务平台)的完整功能实现：
-// - 账号授权认证 (Browser-based OAuth)
-// - 视频上传发布 (Video Upload & Publishing)
-// - 作品评论爬取 (Comment Scraping)
-// - 数据统计 (Statistics)
-//
-// 代码分层结构：
-// - client.rs: HTTP客户端，API通信
-// - uploader.rs: 视频上传器，VOD服务
-// - publisher.rs: 发布器，流程编排
-// - auth.rs: 浏览器自动化授权
-// - comments.rs: 评论获取与管理
-// - signature_v4.rs: AWS V4签名算法
+//! 抖音平台模块
+//!
+//! 提供抖音视频发布功能的相关实现
+//! 包含：账号参数解析、HTTP客户端、签名、上传、发布策略等
+//!
+//! # 模块结构
+//!
+//! - [`account_params`] - 抖音账号参数结构体
+//! - [`utils`] - 工具函数
+//! - [`signature_v4`] - AWS Signature V4 签名
+//! - [`douyin_client`] - HTTP客户端
+//! - [`video_uploader`] - 视频上传器
+//! - [`publish_strategy`] - 发布策略（主入口）
 
-// 子模块
-mod client;
-mod uploader;
-mod publisher;
-mod auth;
-mod comments;
-mod signature_v4;
-
-// 重新导出
-pub use client::{DouyinClient, UploadOptions, UploadAuth, Challenge, HeaderTicket, BdTicketConfig};
-pub use uploader::VideoUploader;
-pub use publisher::DouyinPublisher;
-pub use auth::{DouyinAuthenticator, AuthResult};
-pub use comments::{DouyinCommentClient, Comment, CommentReply};
-
-use async_trait::async_trait;
-use crate::core::{
-    Platform, PlatformType, UserAccount, PlatformCredentials,
-    PlatformPublication, PublicationStatus, PublicationStats, PublishResult, PublishRequest,
-    PlatformError,
-};
+use crate::core::{Platform, PlatformType, PlatformError, PublishResult, PublishRequest as CorePublishRequest};
+use crate::platforms::PublishStrategy;
+use std::sync::Arc;
 use crate::storage::DatabaseManager;
+use crate::core::UserAccount;
 
-// ============================================================================
-// 抖音平台主实现
-// ============================================================================
+/// 抖音账号参数模块
+/// 对应数据库中的 params JSON 结构
+pub mod account_params;
 
-/// 抖音平台主结构体
-/// 实现了Platform trait，提供统一的平台操作接口
+/// 工具函数模块
+/// 提供字符串处理、时间计算等工具方法
+pub mod utils;
+
+/// AWS Signature Version 4 签名模块
+/// 用于视频上传的请求签名
+pub mod signature_v4;
+
+/// 抖音API客户端模块
+/// 负责与抖音服务器进行HTTP通信
+pub mod douyin_client;
+
+/// 视频上传器模块
+/// 负责将视频文件上传到抖音VOD服务器
+pub mod video_uploader;
+
+/// 抖音发布策略模块
+/// 实现策略模式，支持视频发布
+pub mod publish_strategy;
+
+/// 平台类型标识
+/// 1 = 抖音
+pub const PLATFORM_TYPE_DOUYIN: i64 = 1;
+
+/// VOD API URL
+const VOD_API_URL: &str = "https://vod.bytedanceapi.com/";
+
+/// BD Ticket API URL
+const BD_TICKET_API_URL: &str = "https://sssj-acibpxtpbg.cn-beijing.fcapp.run/douyin/bd-ticket-guard-client-data";
+
+/// 视频分片大小 (5MB)
+const VIDEO_MAX_SIZE: u64 = 5 * 1024 * 1024;
+
+/// 并发上传限制
+const CONCURRENT_LIMIT: usize = 2;
+
+// 导出主要类型
+pub use self::publish_strategy::{DouyinPublishStrategy, PublishRequest};
+
+/// 抖音平台实现
+///
+/// 包装发布策略，提供Platform trait实现
 #[derive(Debug, Clone)]
 pub struct DouyinPlatform {
-    /// 数据库管理器，用于账号和作品持久化
-    storage: Option<DatabaseManager>,
-    /// BD Ticket API配置
-    bd_ticket_config: BdTicketConfig,
+    /// 数据库管理器（用于获取账号信息）
+    db_manager: Option<Arc<DatabaseManager>>,
 }
 
 impl DouyinPlatform {
-    /// 创建新的抖音平台实例（无存储）
+    /// 创建新的平台实例
     pub fn new() -> Self {
+        Self { db_manager: None }
+    }
+
+    /// 创建带数据库管理器的平台实例
+    pub fn with_storage(db_manager: DatabaseManager) -> Self {
         Self {
-            storage: None,
-            bd_ticket_config: BdTicketConfig::default(),
-        }
-    }
-
-    /// 使用存储创建平台实例
-    pub fn with_storage(storage: DatabaseManager) -> Self {
-        Self {
-            storage: Some(storage),
-            bd_ticket_config: BdTicketConfig::default(),
-        }
-    }
-
-    /// 使用自定义BD Ticket API URL创建平台实例
-    pub fn with_bd_ticket_url(storage: DatabaseManager, bd_ticket_url: String) -> Self {
-        Self {
-            storage: Some(storage),
-            bd_ticket_config: BdTicketConfig { api_url: bd_ticket_url },
-        }
-    }
-
-    /// 从存储中获取账号
-    fn get_account(&self, account_id: &str) -> Result<UserAccount, PlatformError> {
-        if let Some(storage) = &self.storage {
-            storage.get_account(account_id)?
-                .ok_or_else(|| PlatformError::AccountNotFound(account_id.to_string()))
-        } else {
-            Err(PlatformError::StorageError("存储未初始化".to_string()))
-        }
-    }
-
-    /// 从params解析凭证
-    fn get_credentials(&self, account: &UserAccount) -> Result<PlatformCredentials, PlatformError> {
-        account.get_credentials()
-    }
-
-    /// 保存账号到存储
-    fn save_account(&self, account: &UserAccount) -> Result<(), PlatformError> {
-        if let Some(storage) = &self.storage {
-            storage.save_account(account)
-                .map_err(|e| PlatformError::StorageError(e.to_string()))
-        } else {
-            Err(PlatformError::StorageError("存储未初始化".to_string()))
-        }
-    }
-
-    /// 保存作品到存储
-    fn save_publication(&self, publication: &PlatformPublication) -> Result<(), PlatformError> {
-        if let Some(storage) = &self.storage {
-            storage.save_publication(publication)
-                .map_err(|e| PlatformError::StorageError(e.to_string()))
-        } else {
-            Err(PlatformError::StorageError("存储未初始化".to_string()))
+            db_manager: Some(Arc::new(db_manager)),
         }
     }
 }
@@ -119,129 +90,144 @@ impl Default for DouyinPlatform {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Platform for DouyinPlatform {
-    /// 获取平台类型
     fn platform_type(&self) -> PlatformType {
         PlatformType::Douyin
     }
 
-    /// 获取平台名称
     fn platform_name(&self) -> String {
         "抖音".to_string()
     }
 
-    /// 账号认证
-    /// 使用无头浏览器打开创作服务平台，等待用户扫码/登录后获取凭证
     async fn authenticate_account(&self) -> Result<UserAccount, PlatformError> {
-        let mut authenticator = DouyinAuthenticator::new();
-        let account = authenticator.authenticate().await?;
-        // 保存到存储
-        self.save_account(&account)?;
-        Ok(account)
+        Err(PlatformError::AuthenticationFailed(
+            "浏览器认证需要使用 start_browser_auth 命令".to_string(),
+        ))
     }
 
-    /// 刷新账号凭证
-    async fn refresh_credentials(&self, account_id: &str) -> Result<UserAccount, PlatformError> {
-        let account = self.get_account(account_id)?;
-        // 重新认证获取新凭证
-        let mut authenticator = DouyinAuthenticator::new();
-        let updated_account = authenticator.refresh(account).await?;
-        // 保存更新后的账号
-        self.save_account(&updated_account)?;
-        Ok(updated_account)
+    async fn refresh_credentials(&self, _account_id: &str) -> Result<UserAccount, PlatformError> {
+        Err(PlatformError::AuthenticationFailed(
+            "请重新进行浏览器认证".to_string(),
+        ))
     }
 
-    /// 发布视频
-    async fn publish_video(&self, request: PublishRequest) -> Result<PublishResult, PlatformError> {
-        // 从存储获取账号
-        let account = self.get_account(&request.account_id)?;
+    async fn publish_video(&self, request: CorePublishRequest) -> Result<PublishResult, PlatformError> {
+        tracing::info!("[Publish] 开始抖音发布流程，账号ID: {}", request.account_id);
+        tracing::info!("[Publish] 视频路径: {:?}", request.video_path);
+        tracing::info!("[Publish] 视频标题: {}", request.title);
 
-        // 从params解析凭证
-        let credentials = self.get_credentials(&account)?;
-
-        // 保存需要用于后续的字段
-        let cover_path = request.cover_path.clone();
-        let video_path = request.video_path.clone();
-        let account_id = request.account_id.clone();
-        let title = request.title.clone();
-        let description = request.description.clone();
-
-        // 创建发布器并执行发布流程
-        let publisher = DouyinPublisher::new(
-            account.clone(),
-            credentials,
-            self.bd_ticket_config.clone()
-        );
-        let result = publisher.publish(request).await?;
-
-        // 保存作品记录
-        let publication = PlatformPublication {
-            id: result.publication_id.clone(),
-            account_id,
-            platform: PlatformType::Douyin,
-            title,
-            description,
-            video_path: video_path.to_string_lossy().to_string(),
-            cover_path: cover_path.map(|p| p.to_string_lossy().to_string()),
-            status: PublicationStatus::Publishing,
-            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            published_at: None,
-            publish_url: None,
-            stats: PublicationStats::default(),
-        };
-        self.save_publication(&publication)?;
-
-        Ok(result)
-    }
-
-    /// 获取作品状态
-    async fn get_publication_status(&self, publication_id: &str) -> Result<PlatformPublication, PlatformError> {
-        if let Some(storage) = &self.storage {
-            storage.get_publication(publication_id)?
-                .ok_or_else(|| PlatformError::AccountNotFound(publication_id.to_string()))
-        } else {
-            Err(PlatformError::StorageError("存储未初始化".to_string()))
+        // 检查 db_manager 是否可用
+        if self.db_manager.is_none() {
+            tracing::error!("[Publish] db_manager 未初始化，无法获取账号参数");
+            return Err(PlatformError::InvalidInput("平台未配置数据库连接".to_string()));
         }
+        let db_manager = self.db_manager.as_ref().unwrap();
+
+        // 从数据库获取账号参数
+        tracing::info!("[Publish] 正在查询账号信息: {}", request.account_id);
+        let account = match db_manager.get_account(&request.account_id) {
+            Ok(Some(acc)) => acc,
+            Ok(None) => {
+                tracing::error!("[Publish] 未找到账号: {}", request.account_id);
+                return Err(PlatformError::InvalidInput(
+                    format!("账号不存在: {}", request.account_id)
+                ));
+            }
+            Err(e) => {
+                tracing::error!("[Publish] 查询账号失败: {:?}", e);
+                return Err(PlatformError::InvalidInput(
+                    format!("查询账号失败: {:?}", e)
+                ));
+            }
+        };
+
+        // 解析params JSON获取third_id
+        let account_params = account_params::AccountParams::from_json(&account.params);
+
+        let third_id = account_params.get_third_id();
+
+        tracing::info!("[Publish] get_third_id()返回: {}", if third_id.is_empty() { "为空!" } else { &third_id });
+
+        // 解析cookie和user_agent用于调试
+        let cookie_len = account_params.get_cookie().len();
+        let ua_len = account_params.get_user_agent().len();
+        tracing::info!("[Publish] cookie长度: {}, user_agent长度: {}", cookie_len, ua_len);
+
+        // 将 CorePublishRequest 转换为 DouyinPublishRequest
+        let douyin_request = PublishRequest {
+            account_id: request.account_id.clone(),
+            video_path: request.video_path,
+            cover_path: request.cover_path,
+            title: request.title,
+            description: Some(request.description),
+            hashtag_names: request.hashtags,
+            record_id: None,
+            third_id: Some(third_id.clone()),
+            params: account.params.clone(), // 从数据库获取的账号参数
+            download_allowed: Some(request.download_allowed),
+            visibility_type: Some(request.visibility_type),
+            timeout: Some(request.timeout),
+            send_time: None,
+            music_info: None,
+            poi_id: None,
+            poi_name: None,
+            anchor: None,
+            extra_info: None,
+        };
+
+        // 验证必要的参数
+        if third_id.is_empty() {
+            tracing::error!("[Publish] third_id为空，数据库中的params: {}", account.params);
+            return Err(PlatformError::InvalidInput("thirdId不能为空".to_string()));
+        }
+
+        // 使用发布策略
+        let strategy = DouyinPublishStrategy::new();
+        tracing::info!("[Publish] 开始调用发布策略，third_id前20字符: {}...", &third_id[..third_id.len().min(20)]);
+
+        let result = strategy.publish(douyin_request).await;
+
+        match &result {
+            Ok(r) => tracing::info!("[Publish] 发布结果: success={}, item_id={:?}", r.success, r.item_id),
+            Err(e) => tracing::error!("[Publish] 发布失败: {:?}", e),
+        }
+        result
     }
 
-    /// 获取账号统计数据
-    async fn get_account_stats(&self, _account_id: &str) -> Result<PublicationStats, PlatformError> {
-        // TODO: 从抖音API获取统计数据
-        Ok(PublicationStats::default())
+    async fn get_publication_status(&self, _publication_id: &str) -> Result<crate::core::PlatformPublication, PlatformError> {
+        Err(PlatformError::PublicationFailed(
+            "暂不支持获取发布状态".to_string(),
+        ))
     }
 
-    /// 从params JSON解析平台凭证
-    fn get_credentials_from_params(&self, params: &str) -> Result<PlatformCredentials, PlatformError> {
-        let params_value: serde_json::Value = serde_json::from_str(params)
-            .map_err(|e| PlatformError::InvalidCredentials(format!("解析params失败: {}", e)))?;
+    async fn get_account_stats(&self, _account_id: &str) -> Result<crate::core::PublicationStats, PlatformError> {
+        Err(PlatformError::PublicationFailed(
+            "暂不支持获取账号统计".to_string(),
+        ))
+    }
 
-        let cookie = params_value.get("cookie")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+    fn get_credentials_from_params(&self, params: &str) -> Result<crate::core::PlatformCredentials, PlatformError> {
+        use self::account_params::AccountParams;
+        let account_params = AccountParams::from_json(params);
 
-        let user_agent = params_value.get("user_agent")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let cookie = account_params.get_cookie();
+        let user_agent = account_params.get_user_agent();
+        let third_id = account_params.get_third_id();
+        let local_data = account_params.get_local_data();
 
-        let third_id = params_value.get("third_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        if cookie.is_empty() || user_agent.is_empty() || third_id.is_empty() {
+            return Err(PlatformError::InvalidCredentials(
+                "账号参数不完整".to_string(),
+            ));
+        }
 
-        let sec_uid = params_value.get("sec_uid")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        Ok(PlatformCredentials {
+        Ok(crate::core::PlatformCredentials {
             cookie,
             user_agent,
             third_id,
-            sec_uid,
-            local_data: vec![],
+            sec_uid: None,
+            local_data,
         })
     }
 }
-
