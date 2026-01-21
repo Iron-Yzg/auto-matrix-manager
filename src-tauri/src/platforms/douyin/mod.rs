@@ -1,7 +1,6 @@
 //! 抖音平台模块
 //!
 //! 提供抖音视频发布功能的相关实现
-//! 包含：账号参数解析、HTTP客户端、签名、上传、发布策略等
 //!
 //! # 模块结构
 //!
@@ -10,56 +9,25 @@
 //! - [`signature_v4`] - AWS Signature V4 签名
 //! - [`douyin_client`] - HTTP客户端
 //! - [`video_uploader`] - 视频上传器
-//! - [`publish_strategy`] - 发布策略（主入口）
+//! - [`strategy`] - 发布策略（主入口）
 
-use crate::core::{Platform, PlatformType, PlatformError, PublishResult, PublishRequest as CorePublishRequest};
-use crate::platforms::PublishStrategy;
-use std::sync::Arc;
+use crate::core::{Platform, PlatformType, PlatformError, UserAccount, PublishRequest as CorePublishRequest};
+use crate::platforms::traits::PublishStrategy;
 use crate::storage::DatabaseManager;
-use crate::core::UserAccount;
+use std::sync::Arc;
 
-/// 抖音账号参数模块
-/// 对应数据库中的 params JSON 结构
 pub mod account_params;
-
-/// 工具函数模块
-/// 提供字符串处理、时间计算等工具方法
 pub mod utils;
-
-/// AWS Signature Version 4 签名模块
-/// 用于视频上传的请求签名
 pub mod signature_v4;
-
-/// 抖音API客户端模块
-/// 负责与抖音服务器进行HTTP通信
 pub mod douyin_client;
-
-/// 视频上传器模块
-/// 负责将视频文件上传到抖音VOD服务器
 pub mod video_uploader;
-
-/// 抖音发布策略模块
-/// 实现策略模式，支持视频发布
-pub mod publish_strategy;
-
-/// 平台类型标识
-/// 1 = 抖音
-pub const PLATFORM_TYPE_DOUYIN: i64 = 1;
-
-/// VOD API URL
-const VOD_API_URL: &str = "https://vod.bytedanceapi.com/";
-
-/// BD Ticket API URL
-const BD_TICKET_API_URL: &str = "https://sssj-acibpxtpbg.cn-beijing.fcapp.run/douyin/bd-ticket-guard-client-data";
-
-/// 视频分片大小 (5MB)
-const VIDEO_MAX_SIZE: u64 = 5 * 1024 * 1024;
-
-/// 并发上传限制
-const CONCURRENT_LIMIT: usize = 2;
+pub mod strategy;
 
 // 导出主要类型
-pub use self::publish_strategy::{DouyinPublishStrategy, PublishRequest};
+pub use self::strategy::DouyinPublishStrategy;
+
+/// 平台类型标识
+pub const PLATFORM_TYPE_DOUYIN: i64 = 1;
 
 /// 抖音平台实现
 ///
@@ -112,7 +80,7 @@ impl Platform for DouyinPlatform {
         ))
     }
 
-    async fn publish_video(&self, request: CorePublishRequest) -> Result<PublishResult, PlatformError> {
+    async fn publish_video(&self, request: CorePublishRequest) -> Result<crate::core::PublishResult, PlatformError> {
         tracing::info!("[Publish] 开始抖音发布流程，账号ID: {}", request.account_id);
         tracing::info!("[Publish] 视频路径: {:?}", request.video_path);
         tracing::info!("[Publish] 视频标题: {}", request.title);
@@ -144,37 +112,9 @@ impl Platform for DouyinPlatform {
 
         // 解析params JSON获取third_id
         let account_params = account_params::AccountParams::from_json(&account.params);
-
         let third_id = account_params.get_third_id();
 
         tracing::info!("[Publish] get_third_id()返回: {}", if third_id.is_empty() { "为空!" } else { &third_id });
-
-        // 解析cookie和user_agent用于调试
-        let cookie_len = account_params.get_cookie().len();
-        let ua_len = account_params.get_user_agent().len();
-        tracing::info!("[Publish] cookie长度: {}, user_agent长度: {}", cookie_len, ua_len);
-
-        // 将 CorePublishRequest 转换为 DouyinPublishRequest
-        let douyin_request = PublishRequest {
-            account_id: request.account_id.clone(),
-            video_path: request.video_path,
-            cover_path: request.cover_path,
-            title: request.title,
-            description: Some(request.description),
-            hashtag_names: request.hashtags,
-            record_id: None,
-            third_id: Some(third_id.clone()),
-            params: account.params.clone(), // 从数据库获取的账号参数
-            download_allowed: Some(request.download_allowed),
-            visibility_type: Some(request.visibility_type),
-            timeout: Some(request.timeout),
-            send_time: None,
-            music_info: None,
-            poi_id: None,
-            poi_name: None,
-            anchor: None,
-            extra_info: None,
-        };
 
         // 验证必要的参数
         if third_id.is_empty() {
@@ -182,11 +122,66 @@ impl Platform for DouyinPlatform {
             return Err(PlatformError::InvalidInput("thirdId不能为空".to_string()));
         }
 
+        // 构建抖音特定平台数据
+        let mut platform_data = serde_json::json!({
+            "params": account.params,
+            "third_id": third_id,
+        });
+
+        // 可选字段
+        if let Some(record_id) = &request.record_id {
+            platform_data["record_id"] = serde_json::json!(record_id);
+        }
+        if let Some(send_time) = request.send_time {
+            platform_data["send_time"] = serde_json::json!(send_time);
+        }
+        if let Some(music) = &request.music_info {
+            platform_data["music_id"] = serde_json::json!(&music.music_id);
+            platform_data["music_end_time"] = serde_json::json!(&music.music_end_time);
+        }
+        if let Some(poi_id) = &request.poi_id {
+            platform_data["poi_id"] = serde_json::json!(poi_id);
+        }
+        if let Some(poi_name) = &request.poi_name {
+            platform_data["poi_name"] = serde_json::json!(poi_name);
+        }
+        if let Some(anchor) = &request.anchor {
+            platform_data["anchor"] = anchor.clone();
+        }
+        if let Some(extra_info) = &request.extra_info {
+            if let Some(decl) = &extra_info.self_declaration {
+                platform_data["extra_info"] = serde_json::json!({
+                    "self_declaration": decl
+                });
+            }
+        }
+
         // 使用发布策略
         let strategy = DouyinPublishStrategy::new();
         tracing::info!("[Publish] 开始调用发布策略，third_id前20字符: {}...", &third_id[..third_id.len().min(20)]);
 
-        let result = strategy.publish(douyin_request).await;
+        // 构造带有平台数据的请求
+        let platform_request = CorePublishRequest {
+            account_id: request.account_id.clone(),
+            video_path: request.video_path.clone(),
+            cover_path: request.cover_path.clone(),
+            title: request.title.clone(),
+            description: request.description.clone(),
+            hashtags: request.hashtags.clone(),
+            visibility_type: request.visibility_type,
+            download_allowed: request.download_allowed,
+            timeout: request.timeout,
+            record_id: request.record_id.clone(),
+            send_time: request.send_time,
+            music_info: request.music_info.clone(),
+            poi_id: request.poi_id.clone(),
+            poi_name: request.poi_name.clone(),
+            anchor: request.anchor.clone(),
+            extra_info: request.extra_info.clone(),
+            platform_data: Some(platform_data),
+        };
+
+        let result = strategy.publish(platform_request).await;
 
         match &result {
             Ok(r) => tracing::info!("[Publish] 发布结果: success={}, item_id={:?}", r.success, r.item_id),

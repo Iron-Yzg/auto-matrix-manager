@@ -335,10 +335,10 @@ pub struct PublishTaskResult {
 pub async fn publish_publication_task(
     app: AppHandle,
     task_id: &str,
-    title: &str,
-    description: &str,
-    video_path: &str,
-    hashtags: Vec<String>,
+    _title: &str,
+    _description: &str,
+    _video_path: &str,
+    _hashtags: Vec<String>,
 ) -> Result<Vec<PublishTaskResult>, String> {
     eprintln!("[Publish] Starting publish for task: {}", task_id);
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
@@ -377,8 +377,8 @@ pub async fn publish_publication_task(
             continue;
         }
 
-        // Get the account
-        let account = match db_manager.get_account(&account_detail.account_id).map_err(|e| e.to_string())? {
+        // Get the account (unused but kept for future use)
+        let _account = match db_manager.get_account(&account_detail.account_id).map_err(|e| e.to_string())? {
             Some(acc) => acc,
             None => {
                 eprintln!("[Publish] Account not found: {}", account_detail.account_id);
@@ -400,11 +400,19 @@ pub async fn publish_publication_task(
             video_path: main_task.video_path.clone().into(),
             cover_path: main_task.cover_path.clone().map(|p| p.into()),
             title: main_task.title.clone(),
-            description: main_task.description.clone().unwrap_or_default(),
-            hashtags: hashtags.clone(),
+            description: main_task.description.clone(),
+            hashtags: main_task.hashtags.clone(),
             visibility_type: 0,
             download_allowed: 0,
             timeout: 0,
+            record_id: None,
+            send_time: None,
+            music_info: None,
+            poi_id: None,
+            poi_name: None,
+            anchor: None,
+            extra_info: None,
+            platform_data: None,
         };
 
         // Publish based on platform
@@ -500,11 +508,19 @@ pub fn publish_video(
         video_path: video_path.into(),
         cover_path: None,
         title: title.to_string(),
-        description: description.to_string(),
+        description: Some(description.to_string()),
         hashtags,
         visibility_type: 0,
         download_allowed: 0,
         timeout: 0,
+        record_id: None,
+        send_time: None,
+        music_info: None,
+        poi_id: None,
+        poi_name: None,
+        anchor: None,
+        extra_info: None,
+        platform_data: None,
     };
 
     match platform_type {
@@ -551,11 +567,19 @@ pub fn publish_saved_video(
         video_path: publication.video_path.clone().into(),
         cover_path: publication.cover_path.clone().map(|p| p.into()),
         title: publication.title.clone(),
-        description: publication.description.clone(),
+        description: Some(publication.description.clone()),
         hashtags: vec![],
         visibility_type: 0,
         download_allowed: 0,
         timeout: 0,
+        record_id: None,
+        send_time: None,
+        music_info: None,
+        poi_id: None,
+        poi_name: None,
+        anchor: None,
+        extra_info: None,
+        platform_data: None,
     };
 
     // Publish based on platform
@@ -1034,7 +1058,7 @@ pub async fn select_file_with_content(
     _window: tauri::Window,
     title: &str,
     file_type: &str, // "video" or "image"
-    filters: Option<Vec<String>>,
+    _filters: Option<Vec<String>>,
 ) -> Result<Option<FileSelectionWithContentResult>, String> {
     // Use rfd for native file dialog
     let mut dialog = rfd::AsyncFileDialog::new()

@@ -80,7 +80,6 @@ pub fn substr(input: &str, start: usize, max_length: usize) -> String {
     }
 
     let mut current_length = 0;
-    let mut end_index = start;
 
     for (i, c) in input.char_indices() {
         if i < start {
@@ -93,7 +92,6 @@ pub fn substr(input: &str, start: usize, max_length: usize) -> String {
         }
 
         current_length += char_length;
-        end_index = i + c.len_utf8();
     }
 
     // 再次遍历找到正确的end_index

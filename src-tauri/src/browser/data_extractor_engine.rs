@@ -96,7 +96,7 @@ impl DataExtractorEngine {
         if let Some(config) = &self.current_config {
             if let Some(rules) = config.extract_rules.get("request_headers") {
                 if let Some(headers_map) = rules.as_object() {
-                    for (key, rule_val) in headers_map {
+                    for (_key, rule_val) in headers_map {
                         if let Some(rule) = rule_val.as_str() {
                             if let Some(api_path) = extract_api_path(rule) {
                                 if url.contains(&api_path) {
@@ -117,7 +117,7 @@ impl DataExtractorEngine {
         if let Some(config) = &self.current_config {
             if let Some(rules) = config.extract_rules.get("user_info") {
                 if let Some(user_info_map) = rules.as_object() {
-                    for (key, rule_val) in user_info_map {
+                    for (_key, rule_val) in user_info_map {
                         if let Some(rule) = rule_val.as_str() {
                             if let Some(api_path) = extract_api_path(rule) {
                                 if url.contains(&api_path) {

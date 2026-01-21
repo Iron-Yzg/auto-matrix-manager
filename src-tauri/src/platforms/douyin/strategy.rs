@@ -17,22 +17,12 @@
 //! # 使用示例
 //!
 //! ```rust
-//! use crate::platforms::douyin::publish_strategy::{DouyinPublishStrategy, PublishRequest};
-//! use crate::platforms::PublishStrategyFactory;
+//! use crate::platforms::douyin::DouyinPublishStrategy;
+//! use crate::platforms::factory::PublishStrategyFactory;
 //! use crate::core::PlatformType;
 //!
-//! // 创建发布请求
-//! let request = PublishRequest {
-//!     video_path: "/path/to/video.mp4".into(),
-//!     title: "视频标题".to_string(),
-//!     description: Some("视频描述".to_string()),
-//!     hashtag_names: vec!["话题1".to_string(), "话题2".to_string()],
-//!     params: r#"{"third_id":"123","third_param":{"cookie":"xxx"}}"#.to_string(),
-//!     // ...其他字段
-//! };
-//!
 //! // 使用工厂获取发布策略
-//! let strategy = PublishStrategyFactory::get_service(PlatformType::Douyin);
+//! let strategy = PublishStrategyFactory::get_service(PlatformType::Douyin).await;
 //! if let Some(s) = strategy {
 //!     let result = s.publish(request).await;
 //! }
@@ -42,8 +32,8 @@
 //!
 //! 本模块完全对应Java中的 `DouyinPublishStrategy.java`
 
-use crate::core::{PlatformError, PublishResult};
-use crate::platforms::PublishStrategy;
+use crate::core::{PlatformError, PublishResult, PublishRequest as CorePublishRequest};
+use crate::platforms::traits::PublishStrategy;
 use crate::platforms::douyin::account_params::AccountParams;
 use crate::platforms::douyin::douyin_client::DouyinClient;
 use crate::platforms::douyin::utils::{
@@ -54,53 +44,51 @@ use crate::platforms::douyin::video_uploader::VideoUploader;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 /// 平台类型标识
 /// 1 = 抖音
 pub const PLATFORM_TYPE_DOUYIN: i64 = 1;
 
-/// 发布请求
+/// 抖音发布配置
 ///
-/// 包含视频发布所需的所有信息
-#[derive(Debug, Clone)]
-pub struct PublishRequest {
-    /// 账号ID
-    pub account_id: String,
-    /// 视频文件路径
-    pub video_path: PathBuf,
-    /// 封面图片路径
-    pub cover_path: Option<PathBuf>,
-    /// 视频标题
-    pub title: String,
-    /// 视频描述（文案）
-    pub description: Option<String>,
-    /// 话题标签列表
-    pub hashtag_names: Vec<String>,
+/// 从 platform_data JSON 中解析抖音特定的发布配置
+#[derive(Debug, Clone, Default)]
+pub struct DouyinPublishConfig {
     /// 记录ID（用于回调）
     pub record_id: Option<String>,
     /// 第三方用户ID
     pub third_id: Option<String>,
-    /// 账号参数JSON（数据库中的params字段）
-    pub params: String,
-    /// 是否允许下载
-    pub download_allowed: Option<i32>,
-    /// 可见性类型
-    pub visibility_type: Option<i32>,
-    /// 超时时间（秒）
-    pub timeout: Option<i64>,
     /// 发送时间（Unix时间戳）
     pub send_time: Option<i64>,
-    /// 音乐信息
-    pub music_info: Option<HashMap<String, String>>,
-    /// POI信息
+    /// 音乐ID
+    pub music_id: Option<String>,
+    /// 音乐结束时间
+    pub music_end_time: Option<String>,
+    /// POI ID
     pub poi_id: Option<String>,
+    /// POI名称
     pub poi_name: Option<String>,
     /// 锚点信息
-    pub anchor: Option<HashMap<String, Value>>,
+    pub anchor: Option<serde_json::Value>,
     /// 额外信息
-    pub extra_info: Option<HashMap<String, Value>>,
+    pub extra_info: Option<serde_json::Value>,
+}
+
+impl DouyinPublishConfig {
+    /// 从 platform_data JSON 解析配置
+    pub fn from_platform_data(data: &serde_json::Value) -> Self {
+        Self {
+            record_id: data.get("record_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            third_id: data.get("third_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            send_time: data.get("send_time").and_then(|v| v.as_i64()),
+            music_id: data.get("music_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            music_end_time: data.get("music_end_time").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            poi_id: data.get("poi_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            poi_name: data.get("poi_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            anchor: data.get("anchor").cloned(),
+            extra_info: data.get("extra_info").cloned(),
+        }
+    }
 }
 
 /// 抖音视频发布策略
@@ -110,28 +98,13 @@ pub struct PublishRequest {
 /// # 与Java代码对照
 ///
 /// - `DouyinPublishStrategy.java` (588行)
-#[derive(Debug, Clone)]
-pub struct DouyinPublishStrategy {
-    // 客户端缓存（用于复用）
-    client_cache: Arc<Mutex<HashMap<String, DouyinClient>>>,
-}
+#[derive(Debug, Clone, Default)]
+pub struct DouyinPublishStrategy;
 
 impl DouyinPublishStrategy {
     /// 创建新的发布策略实例
     pub fn new() -> Self {
-        Self {
-            client_cache: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// 获取或创建客户端
-    fn get_or_create_client(&self, params: &AccountParams) -> DouyinClient {
-        let cookie = params.get_cookie();
-        let user_agent = params.get_user_agent();
-        let third_id = params.get_third_id();
-        let local_data = params.get_local_data();
-
-        DouyinClient::new(cookie, user_agent, third_id, local_data)
+        Self
     }
 }
 
@@ -141,7 +114,22 @@ impl PublishStrategy for DouyinPublishStrategy {
     ///
     /// # 参数
     ///
-    /// * `request` - 发布请求
+    /// * `request` - 发布请求（包含 platform_data 中的抖音特定参数）
+    ///
+    /// # 平台数据格式
+    ///
+    /// ```json
+    /// {
+    ///   "params": "数据库中的账号参数JSON",
+    ///   "third_id": "第三方用户ID",
+    ///   "record_id": "记录ID（用于回调）",
+    ///   "send_time": 1234567890,
+    ///   "music_id": "音乐ID",
+    ///   "music_end_time": "音乐结束时间",
+    ///   "poi_id": "POI ID",
+    ///   "poi_name": "POI名称"
+    /// }
+    /// ```
     ///
     /// # 返回
     ///
@@ -150,7 +138,7 @@ impl PublishStrategy for DouyinPublishStrategy {
     /// # 错误
     ///
     /// 如果发布失败，返回错误信息
-    async fn publish(&self, request: PublishRequest) -> Result<PublishResult, PlatformError> {
+    async fn publish(&self, request: CorePublishRequest) -> Result<PublishResult, PlatformError> {
         // ========== 步骤1: 参数校验 ==========
         tracing::info!("[Publish] ====== 步骤1: 参数校验 ======");
 
@@ -158,20 +146,27 @@ impl PublishStrategy for DouyinPublishStrategy {
             return Err(PlatformError::InvalidInput("视频路径不能为空".to_string()));
         }
 
-        if request.params.is_empty() {
-            return Err(PlatformError::InvalidInput("账号参数不能为空".to_string()));
-        }
+        // 从 platform_data 获取抖音特定参数
+        let platform_data = request.platform_data.as_ref()
+            .ok_or_else(|| PlatformError::InvalidInput("platform_data不能为空".to_string()))?;
+
+        let params = platform_data.get("params")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| PlatformError::InvalidInput("params不能为空".to_string()))?
+            .to_string();
 
         // ========== 步骤2: 解析抖音账号参数 ==========
         tracing::info!("[Publish] ====== 步骤2: 解析抖音账号参数 ======");
 
-        let account_params = AccountParams::from_json(&request.params);
+        let account_params = AccountParams::from_json(&params);
 
-        let third_id = request.third_id.clone().unwrap_or_else(|| account_params.get_third_id());
+        let third_id = platform_data.get("third_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| account_params.get_third_id());
 
         if third_id.is_empty() {
             tracing::error!("[Publish] third_id为空，无法发布视频");
-            tracing::error!("[Publish] 请求中的third_id: {:?}", request.third_id);
             tracing::error!("[Publish] 解析AccountParams结果: third_id={:?}, cookie={}...",
                 account_params.third_id,
                 account_params.get_cookie().len()
@@ -228,11 +223,12 @@ impl PublishStrategy for DouyinPublishStrategy {
         // ========== 步骤7: 处理文案和话题标签 ==========
         tracing::info!("[Publish] ====== 步骤7: 处理文案和话题标签 ======");
 
+        let description = request.description.as_deref().unwrap_or("");
         let caption_result = self.process_caption_and_hashtags(
             &mut client,
             &request.title,
-            request.description.as_deref().unwrap_or(""),
-            &request.hashtag_names,
+            description,
+            &request.hashtags,
         ).await;
 
         tracing::info!("[Publish] 文案处理完成, 标题长度: {}, 话题数: {}",
@@ -241,7 +237,10 @@ impl PublishStrategy for DouyinPublishStrategy {
         // ========== 步骤8: 构建发布数据 ==========
         tracing::info!("[Publish] ====== 步骤8: 构建发布数据 ======");
 
-        let publish_data = self.build_publish_data(caption_result, &video_id, &request);
+        // 获取抖音特定配置
+        let douyin_config = DouyinPublishConfig::from_platform_data(platform_data);
+
+        let publish_data = self.build_publish_data(caption_result, &video_id, &request, &douyin_config);
 
         // ========== 步骤9: 发布视频 ==========
         tracing::info!("[Publish] ====== 步骤9: 发布视频到抖音 ======");
@@ -252,14 +251,13 @@ impl PublishStrategy for DouyinPublishStrategy {
             .map_err(|e| PlatformError::PublicationFailed(e))?;
 
         // 构建返回结果
-        let timing = self.get_timing_from_publish_data(&post_result);
         let item_id = self.get_item_id_from_result(&post_result);
 
         tracing::info!("抖音视频发布成功, itemId: {}", item_id);
 
         Ok(PublishResult {
             success: true,
-            publication_id: request.record_id.clone().unwrap_or_default(),
+            publication_id: douyin_config.record_id.unwrap_or_default(),
             item_id: Some(item_id),
             error_message: None,
         })
@@ -531,7 +529,8 @@ impl DouyinPublishStrategy {
     ///
     /// * `caption_result` - 文案处理结果
     /// * `video_id` - 视频ID
-    /// * `request` - 发布请求
+    /// * `request` - 公共发布请求
+    /// * `config` - 抖音特定配置
     ///
     /// # 返回
     ///
@@ -540,16 +539,13 @@ impl DouyinPublishStrategy {
         &self,
         caption_result: CaptionAndHashtagsResult,
         video_id: &str,
-        request: &PublishRequest,
+        request: &CorePublishRequest,
+        config: &DouyinPublishConfig,
     ) -> HashMap<String, Value> {
         let creation_id = generate_creation_id();
 
-        let mut music_id = String::new();
-        let mut music_end_time = String::new();
-        if let Some(music_info) = &request.music_info {
-            music_id = music_info.get("music_id").cloned().unwrap_or_default();
-            music_end_time = music_info.get("music_end_time").cloned().unwrap_or_default();
-        }
+        let music_id = config.music_id.clone().unwrap_or_default();
+        let music_end_time = config.music_end_time.clone().unwrap_or_default();
 
         let mut common_data: HashMap<String, Value> = HashMap::new();
         common_data.insert("text".to_string(), Value::String(caption_result.text.trim().to_string()));
@@ -570,11 +566,11 @@ impl DouyinPublishStrategy {
         common_data.insert("hot_sentence".to_string(), Value::String(String::new()));
         common_data.insert(
             "download".to_string(),
-            Value::Number(serde_json::Number::from(request.download_allowed.unwrap_or(1))),
+            Value::Number(serde_json::Number::from(request.download_allowed)),
         );
         common_data.insert(
             "visibility_type".to_string(),
-            Value::Number(serde_json::Number::from(request.visibility_type.unwrap_or(0))),
+            Value::Number(serde_json::Number::from(request.visibility_type)),
         );
         common_data.insert("timing".to_string(), Value::Number(serde_json::Number::from(0)));
         common_data.insert("creation_id".to_string(), Value::String(creation_id));
@@ -591,14 +587,12 @@ impl DouyinPublishStrategy {
             common_data.insert("music_id".to_string(), Value::Null);
         }
 
-        if let Some(timeout) = request.timeout {
-            if timeout > 0 {
-                let timing = calculate_timing(timeout, request.send_time.unwrap_or(0));
-                common_data.insert("timing".to_string(), Value::Number(serde_json::Number::from(timing)));
-            }
+        if request.timeout > 0 {
+            let timing = calculate_timing(request.timeout, config.send_time.unwrap_or(0));
+            common_data.insert("timing".to_string(), Value::Number(serde_json::Number::from(timing)));
         }
 
-        let anchor_data = self.build_anchor_data(request);
+        let anchor_data = self.build_anchor_data(config);
 
         let mut item_data: HashMap<String, Value> = HashMap::new();
         item_data.insert("common".to_string(), Value::Object(serde_json::Map::from_iter(common_data)));
@@ -607,45 +601,43 @@ impl DouyinPublishStrategy {
         item_data.insert("sync".to_string(), self.create_sync_data());
         item_data.insert("open_platform".to_string(), Value::Object(serde_json::Map::new()));
         item_data.insert("assistant".to_string(), self.create_assistant_data());
-        item_data.insert("declare".to_string(), self.create_declare_data(request.extra_info.as_ref()));
+        item_data.insert("declare".to_string(), self.create_declare_data(config.extra_info.as_ref()));
 
         let mut version2_data: HashMap<String, Value> = HashMap::new();
         version2_data.insert("item".to_string(), Value::Object(serde_json::Map::from_iter(item_data)));
 
-        if let Some(timeout) = request.timeout {
-            if timeout > 0 {
-                version2_data.insert(
-                    "timeOut".to_string(),
-                    Value::Number(serde_json::Number::from(timeout)),
-                );
-                version2_data.insert(
-                    "sendTime".to_string(),
-                    Value::Number(serde_json::Number::from(request.send_time.unwrap_or(0))),
-                );
-            }
+        if request.timeout > 0 {
+            version2_data.insert(
+                "timeOut".to_string(),
+                Value::Number(serde_json::Number::from(request.timeout)),
+            );
+            version2_data.insert(
+                "sendTime".to_string(),
+                Value::Number(serde_json::Number::from(config.send_time.unwrap_or(0))),
+            );
         }
 
         version2_data
     }
 
     /// 构建anchor数据
-    fn build_anchor_data(&self, request: &PublishRequest) -> HashMap<String, Value> {
+    fn build_anchor_data(&self, config: &DouyinPublishConfig) -> HashMap<String, Value> {
         let mut anchor_data: HashMap<String, Value> = HashMap::new();
 
         // 处理POI
-        if let Some(poi_id) = &request.poi_id {
+        if let Some(poi_id) = &config.poi_id {
             if !poi_id.is_empty() && poi_id != "null" {
                 anchor_data.insert("poi_id".to_string(), Value::String(poi_id.clone()));
                 anchor_data.insert(
                     "poi_name".to_string(),
-                    Value::String(request.poi_name.clone().unwrap_or_default()),
+                    Value::String(config.poi_name.clone().unwrap_or_default()),
                 );
                 anchor_data.insert("anchor_content".to_string(), Value::String(format_poi_anchor_content()));
             }
         }
 
         // 处理锚点中的POI
-        if let Some(anchor) = &request.anchor {
+        if let Some(anchor) = &config.anchor {
             if let Some(poi_component) = anchor.get("poi_component") {
                 if let Some(poi_obj) = poi_component.as_object() {
                     let poi_id = poi_obj.get("poi_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -690,7 +682,7 @@ impl DouyinPublishStrategy {
     }
 
     /// 创建声明数据
-    fn create_declare_data(&self, extra_info: Option<&HashMap<String, Value>>) -> Value {
+    fn create_declare_data(&self, extra_info: Option<&serde_json::Value>) -> Value {
         let mut declare: HashMap<String, Value> = HashMap::new();
 
         if let Some(info) = extra_info {
@@ -707,18 +699,6 @@ impl DouyinPublishStrategy {
         }
 
         Value::Object(serde_json::Map::from_iter(declare))
-    }
-
-    /// 从发布数据获取timing
-    fn get_timing_from_publish_data(&self, publish_data: &Value) -> i64 {
-        if let Some(item) = publish_data.get("item") {
-            if let Some(common) = item.get("common") {
-                if let Some(timing) = common.get("timing") {
-                    return timing.as_i64().unwrap_or(0);
-                }
-            }
-        }
-        0
     }
 
     /// 从结果获取item_id
@@ -747,8 +727,3 @@ struct CaptionAndHashtagsResult {
     text_extra: Vec<HashMap<String, Value>>,
 }
 
-impl Default for DouyinPublishStrategy {
-    fn default() -> Self {
-        Self::new()
-    }
-}

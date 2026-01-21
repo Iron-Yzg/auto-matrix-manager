@@ -203,18 +203,77 @@ impl std::convert::From<std::io::Error> for PlatformError {
     }
 }
 
+/// 音乐信息
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MusicInfo {
+    pub music_id: String,
+    pub music_end_time: String,
+}
+
+/// 额外信息
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtraInfo {
+    pub self_declaration: Option<serde_json::Value>,
+}
+
 /// Publish request
-#[derive(Debug, Clone)]
+///
+/// 包含视频发布所需的公共信息
+/// 各平台可通过 platform_data 字段传递平台特定的扩展数据
+#[derive(Debug, Clone, Default)]
 pub struct PublishRequest {
     pub account_id: String,
     pub video_path: PathBuf,
     pub cover_path: Option<PathBuf>,
     pub title: String,
-    pub description: String,
+    pub description: Option<String>,
     pub hashtags: Vec<String>,
     pub visibility_type: i32,
     pub download_allowed: i32,
     pub timeout: i64,
+    /// 记录ID（用于回调）
+    pub record_id: Option<String>,
+    /// 发送时间（Unix时间戳）
+    pub send_time: Option<i64>,
+    /// 音乐信息
+    pub music_info: Option<MusicInfo>,
+    /// POI ID
+    pub poi_id: Option<String>,
+    pub poi_name: Option<String>,
+    /// 锚点信息
+    pub anchor: Option<serde_json::Value>,
+    /// 额外信息
+    pub extra_info: Option<ExtraInfo>,
+    /// 平台特定数据（JSON格式，各平台可自定义结构）
+    /// - 抖音: {"params": "...", "third_id": "...", ...}
+    /// - 快手: {"access_token": "...", ...}
+    /// - 小红书: {"cookie": "...", ...}
+    pub platform_data: Option<serde_json::Value>,
+}
+
+impl PublishRequest {
+    /// 从平台数据获取指定字段
+    pub fn get_platform_field<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.platform_data
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// 从平台数据获取字符串字段
+    pub fn get_platform_string(&self, key: &str) -> Option<String> {
+        self.platform_data
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// 设置平台数据
+    pub fn with_platform_data(mut self, data: serde_json::Value) -> Self {
+        self.platform_data = Some(data);
+        self
+    }
 }
 
 /// Platform trait - defines the interface for all platform implementations
