@@ -493,12 +493,15 @@ pub async fn publish_publication_task(
 
                     if let Err(e) = db_manager.update_publication_account_status(
                         &detail_id,
-                        new_status,
+                        new_status.clone(),
                         publish_url.clone(),
                         message.clone(),
                         item_id.clone(),
                     ) {
                         tracing::error!("[Publish] Failed to update status for {}: {}", detail_id, e);
+                    } else {
+                        tracing::info!("[Publish] ✅ Account status updated: detail_id={}, status={:?}, item_id={:?}",
+                            detail_id, new_status, item_id);
                     }
 
                     // 进度事件由 strategy.rs 中的 emit_progress 发送
@@ -523,6 +526,8 @@ pub async fn publish_publication_task(
                         None,
                     ) {
                         tracing::error!("[Publish] Failed to update status for {}: {}", detail_id, e2);
+                    } else {
+                        tracing::info!("[Publish] ✅ Account status updated to Failed: detail_id={}", detail_id);
                     }
 
                     // 进度事件由 strategy.rs 中的 emit_progress 发送
@@ -562,9 +567,14 @@ pub async fn publish_publication_task(
     let failed_count = results.len() - success_count;
     let completed_accounts = task.accounts.len(); // All accounts accounted for
 
+    tracing::info!("[Publish] Results: {} success, {} failed, detail_ids: {:?}",
+        success_count, failed_count, results.iter().map(|r| &r.detail_id).collect::<Vec<_>>());
+
     // Update main task status based on all account statuses
     if let Err(e) = db_manager.update_task_status_from_accounts(task_id) {
         tracing::error!("[Publish] Failed to update task status: {}", e);
+    } else {
+        tracing::info!("[Publish] Task status updated successfully");
     }
 
     tracing::info!("[Publish] Publish completed: {} success, {} failed", success_count, failed_count);

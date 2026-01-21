@@ -196,6 +196,17 @@ onMounted(async () => {
         message: progress.message,
         status: progress.status
       }
+      // 如果发布完成或失败，同步更新 publishedAccounts 中的状态
+      if (progress.status === 'completed' || progress.status === 'failed') {
+        const account = publishedAccounts.value.find((acc: any) => acc.id === progress.detail_id)
+        if (account) {
+          account.status = progress.status === 'completed' ? 'completed' : 'failed'
+          // 如果有item_id也同步更新
+          if (progress.status === 'completed' && account.itemId === null) {
+            // item_id 可以通过其他方式获取，这里先不更新
+          }
+        }
+      }
     })
   } catch (error) {
     console.error('Failed to load publication detail:', error)

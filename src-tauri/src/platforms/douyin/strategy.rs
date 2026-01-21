@@ -761,9 +761,10 @@ impl DouyinPublishStrategy {
 
     /// 从结果获取item_id
     fn get_item_id_from_result(&self, post_result: &Value) -> String {
+        // 响应格式: {"extra": {...}, "item_id": "xxx", "status_code": 0}
+        // item_id 在根级别
         post_result
-            .get("aweme")
-            .and_then(|v| v.get("item_id"))
+            .get("item_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string()
