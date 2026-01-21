@@ -29,10 +29,10 @@ const router = createRouter({
       props: true
     },
     {
-      path: '/comments/:id',
+      path: '/comments',
       name: 'comment-detail',
       component: CommentDetail,
-      props: true
+      props: route => ({ id: route.query.id, awemeId: route.query.awemeId, accountName: route.query.accountName })
     },
     {
       path: '/settings',

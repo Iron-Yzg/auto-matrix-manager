@@ -104,6 +104,46 @@ pub struct PublicationStats {
     pub shares: i64,
 }
 
+// ============================================================================
+// Comment types (评论表结构)
+// ============================================================================
+
+/// Comment - 评论表
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: String,
+    pub account_id: String,        // 账号ID
+    pub aweme_id: String,          // 作品ID (item_id)
+    pub comment_id: String,        // 抖音评论ID
+    pub user_id: String,           // 评论用户ID
+    pub user_nickname: String,     // 评论用户昵称
+    pub user_avatar: String,       // 评论用户头像
+    pub content: String,           // 评论内容
+    pub like_count: i64,           // 点赞数
+    pub reply_count: i64,          // 回复数
+    pub create_time: String,       // 评论时间
+    pub status: CommentStatus,     // 状态
+    pub created_at: String,        // 入库时间
+}
+
+/// Comment status
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CommentStatus {
+    Pending,     // 待处理
+    Completed,   // 已完成
+    Failed,      // 失败
+}
+
+/// Comment extraction result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentExtractResult {
+    pub success: bool,
+    pub total_extracted: i64,
+    pub total_in_aweme: i64,      // 作品总评论数
+    pub comments: Vec<Comment>,
+    pub error_message: Option<String>,
+}
+
 /// Publication result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishResult {

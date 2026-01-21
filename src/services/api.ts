@@ -498,3 +498,129 @@ export async function cancelBrowserAuth(): Promise<void> {
     throw error
   }
 }
+
+// ============================================================================
+// Comment Extraction Functions
+// 评论提取功能
+// ============================================================================
+
+/**
+ * Comment interface
+ */
+export interface Comment {
+  id: string
+  accountId: string
+  awemeId: string
+  commentId: string
+  userId: string
+  userNickname: string
+  userAvatar: string
+  content: string
+  likeCount: number
+  replyCount: number
+  createTime: string
+  status: 'Pending' | 'Completed' | 'Failed'
+  createdAt: string
+}
+
+/**
+ * Comment extraction result
+ */
+export interface CommentExtractResult {
+  success: boolean
+  totalExtracted: number
+  totalInAweme: number
+  comments: Comment[]
+  errorMessage: string | null
+}
+
+/**
+ * Extract comments from a video
+ * @param detailId - Publication account detail ID (publication_accounts table id)
+ * @param awemeId - Video ID (item_id)
+ * @param maxCount - Maximum number of comments to extract (default: 500)
+ */
+export async function extractComments(
+  detailId: string,
+  awemeId: string,
+  maxCount: number = 500
+): Promise<CommentExtractResult> {
+  try {
+    return await invoke<CommentExtractResult>('extract_comments', {
+      detailId,
+      awemeId,
+      maxCount,
+    })
+  } catch (error) {
+    console.error('Failed to extract comments:', error)
+    throw error
+  }
+}
+
+/**
+ * Get comments by aweme_id
+ */
+export async function getCommentsByAwemeId(awemeId: string): Promise<Comment[]> {
+  try {
+    return await invoke<Comment[]>('get_comments_by_aweme_id', { awemeId })
+  } catch (error) {
+    console.error('Failed to get comments:', error)
+    throw error
+  }
+}
+
+/**
+ * Get comments by account_id
+ */
+export async function getCommentsByAccountId(accountId: string): Promise<Comment[]> {
+  try {
+    return await invoke<Comment[]>('get_comments_by_account_id', { accountId })
+  } catch (error) {
+    console.error('Failed to get comments:', error)
+    throw error
+  }
+}
+
+/**
+ * Get comments by aweme_id with pagination
+ */
+export async function getCommentsByAwemeIdPaginated(
+  awemeId: string,
+  offset: number,
+  limit: number
+): Promise<Comment[]> {
+  try {
+    return await invoke<Comment[]>('get_comments_by_aweme_id_paginated', {
+      awemeId,
+      offset,
+      limit,
+    })
+  } catch (error) {
+    console.error('Failed to get comments (paginated):', error)
+    throw error
+  }
+}
+
+/**
+ * Get comment count by aweme_id
+ */
+export async function getCommentCount(awemeId: string): Promise<number> {
+  try {
+    return await invoke<number>('get_comment_count', { awemeId })
+  } catch (error) {
+    console.error('Failed to get comment count:', error)
+    throw error
+  }
+}
+
+/**
+ * Delete comments by aweme_id
+ */
+export async function deleteComments(awemeId: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>('delete_comments', { awemeId })
+  } catch (error) {
+    console.error('Failed to delete comments:', error)
+    throw error
+  }
+}

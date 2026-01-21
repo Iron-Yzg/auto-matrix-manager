@@ -4,8 +4,9 @@
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
 use crate::core::{
-    UserAccount, PlatformType, AccountStatus, PlatformPublication,
+    UserAccount, PlatformType, AccountStatus,
     PublicationStatus, PublicationStats, PublicationTask, PublicationAccountDetail,
+    Comment, CommentStatus,
 };
 
 /// Database manager for SQLite operations
@@ -93,7 +94,6 @@ impl DatabaseManager {
         // Publication accounts table - 账号发布详情子表
         // 注意：title/description/hashtags 只在主表存储，子表只存储关联信息
         // 冗余 account_name 字段便于直接显示
-        // 注意：移除了外键约束，允许独立管理
         conn.execute(r#"
             CREATE TABLE IF NOT EXISTS publication_accounts (
                 id TEXT PRIMARY KEY,
@@ -108,7 +108,9 @@ impl DatabaseManager {
                 comments INTEGER DEFAULT 0,
                 likes INTEGER DEFAULT 0,
                 favorites INTEGER DEFAULT 0,
-                shares INTEGER DEFAULT 0
+                shares INTEGER DEFAULT 0,
+                message TEXT DEFAULT '',
+                item_id TEXT DEFAULT ''
             )
         "#, [])?;
 
@@ -117,38 +119,6 @@ impl DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_publication_accounts_task_id
             ON publication_accounts(publication_task_id)
         "#, [])?;
-
-        // Migration: Add account_name column if not exists
-        // 迁移：为 publication_accounts 表添加 account_name 列
-        // SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we check first
-        let table_info: Result<Vec<_>, rusqlite::Error> = conn.prepare("PRAGMA table_info(publication_accounts)")?
-            .query_map([], |row| Ok(row.get::<_, String>(1)?))?
-            .collect();
-        if let Ok(columns) = table_info {
-            if !columns.contains(&"account_name".to_string()) {
-                conn.execute_batch("ALTER TABLE publication_accounts ADD COLUMN account_name TEXT NOT NULL DEFAULT ''")?;
-            }
-            // Migration: Update existing records with account_name from accounts table
-            // 迁移：更新现有记录的 account_name 字段
-            conn.execute_batch(r#"
-                UPDATE publication_accounts
-                SET account_name = (
-                    SELECT COALESCE(nickname, username) FROM accounts
-                    WHERE accounts.id = publication_accounts.account_id
-                )
-                WHERE account_name = '' OR account_name IS NULL
-            "#)?;
-
-            // Migration: Add message column (失败原因记录)
-            if !columns.contains(&"message".to_string()) {
-                conn.execute_batch("ALTER TABLE publication_accounts ADD COLUMN message TEXT DEFAULT ''")?;
-            }
-
-            // Migration: Add item_id column (发布的视频ID)
-            if !columns.contains(&"item_id".to_string()) {
-                conn.execute_batch("ALTER TABLE publication_accounts ADD COLUMN item_id TEXT DEFAULT ''")?;
-            }
-        }
 
         // Platform extractor configs table - 平台数据提取引擎配置
         conn.execute(r#"
@@ -168,6 +138,41 @@ impl DatabaseManager {
 
         // Initialize default configurations for supported platforms
         Self::initialize_default_configs(conn)?;
+
+        // Comments table - 评论表
+        conn.execute(r#"
+            CREATE TABLE IF NOT EXISTS comments (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                aweme_id TEXT NOT NULL,
+                comment_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                user_nickname TEXT NOT NULL,
+                user_avatar TEXT NOT NULL,
+                content TEXT NOT NULL,
+                like_count INTEGER DEFAULT 0,
+                reply_count INTEGER DEFAULT 0,
+                create_time TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        "#, [])?;
+
+        // Create indexes for faster queries
+        conn.execute(r#"
+            CREATE INDEX IF NOT EXISTS idx_comments_account_id
+            ON comments(account_id)
+        "#, [])?;
+
+        conn.execute(r#"
+            CREATE INDEX IF NOT EXISTS idx_comments_aweme_id
+            ON comments(aweme_id)
+        "#, [])?;
+
+        conn.execute(r#"
+            CREATE INDEX IF NOT EXISTS idx_comments_comment_id
+            ON comments(comment_id)
+        "#, [])?;
 
         Ok(())
     }
@@ -283,142 +288,7 @@ impl DatabaseManager {
     }
 
     // ============================================================================
-    // 作品发布操作
-    // ============================================================================
-
-    /// Save publication
-    /// 保存发布记录
-    pub fn save_publication(&self, publication: &PlatformPublication) -> Result<(), rusqlite::Error> {
-        let conn = self.get_connection()?;
-
-        conn.execute(r#"
-            INSERT OR REPLACE INTO publications (
-                id, account_id, platform, title, description, video_path, cover_path,
-                status, created_at, published_at, publish_url,
-                comments, likes, favorites, shares
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#, &[
-            &publication.id,
-            &publication.account_id,
-            &format!("{:?}", publication.platform),
-            &publication.title,
-            &publication.description,
-            &publication.video_path,
-            publication.cover_path.as_ref().unwrap_or(&String::new()),
-            &format!("{:?}", publication.status),
-            &publication.created_at,
-            publication.published_at.as_ref().unwrap_or(&String::new()),
-            publication.publish_url.as_ref().unwrap_or(&String::new()),
-            &publication.stats.comments.to_string(),
-            &publication.stats.likes.to_string(),
-            &publication.stats.favorites.to_string(),
-            &publication.stats.shares.to_string(),
-        ])?;
-
-        Ok(())
-    }
-
-    /// Get publication by ID
-    /// 根据 ID 获取发布记录
-    pub fn get_publication(&self, publication_id: &str) -> Result<Option<PlatformPublication>, rusqlite::Error> {
-        let conn = self.get_connection()?;
-
-        let mut stmt = conn.prepare("SELECT * FROM publications WHERE id = ?")?;
-
-        match stmt.query_row([publication_id], |row| {
-            Ok(PlatformPublication {
-                id: row.get(0)?,
-                account_id: row.get(1)?,
-                platform: Self::parse_platform(row.get::<_, String>(2)?),
-                title: row.get(3)?,
-                description: row.get(4)?,
-                video_path: row.get(5)?,
-                cover_path: Some(row.get(6)?),
-                status: Self::parse_publication_status(row.get::<_, String>(7)?),
-                created_at: row.get(8)?,
-                published_at: Some(row.get(9)?),
-                publish_url: Some(row.get(10)?),
-                stats: PublicationStats {
-                    comments: row.get::<_, String>(11)?.parse().unwrap_or(0),
-                    likes: row.get::<_, String>(12)?.parse().unwrap_or(0),
-                    favorites: row.get::<_, String>(13)?.parse().unwrap_or(0),
-                    shares: row.get::<_, String>(14)?.parse().unwrap_or(0),
-                },
-            })
-        }) {
-            Ok(publication) => Ok(Some(publication)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Get publications for an account
-    /// 获取账号的所有发布记录
-    pub fn get_publications_by_account(&self, account_id: &str) -> Result<Vec<PlatformPublication>, rusqlite::Error> {
-        let conn = self.get_connection()?;
-
-        let mut stmt = conn.prepare(
-            "SELECT * FROM publications WHERE account_id = ? ORDER BY created_at DESC"
-        )?;
-
-        let publications = stmt.query_map([account_id], |row| {
-            Ok(PlatformPublication {
-                id: row.get(0)?,
-                account_id: row.get(1)?,
-                platform: Self::parse_platform(row.get::<_, String>(2)?),
-                title: row.get(3)?,
-                description: row.get(4)?,
-                video_path: row.get(5)?,
-                cover_path: Some(row.get(6)?),
-                status: Self::parse_publication_status(row.get::<_, String>(7)?),
-                created_at: row.get(8)?,
-                published_at: Some(row.get(9)?),
-                publish_url: Some(row.get(10)?),
-                stats: PublicationStats {
-                    comments: row.get::<_, String>(11)?.parse().unwrap_or(0),
-                    likes: row.get::<_, String>(12)?.parse().unwrap_or(0),
-                    favorites: row.get::<_, String>(13)?.parse().unwrap_or(0),
-                    shares: row.get::<_, String>(14)?.parse().unwrap_or(0),
-                },
-            })
-        })?.filter_map(|r| r.ok()).collect();
-
-        Ok(publications)
-    }
-
-    /// Get all publications
-    /// 获取所有发布记录
-    pub fn get_all_publications(&self) -> Result<Vec<PlatformPublication>, rusqlite::Error> {
-        let conn = self.get_connection()?;
-
-        let mut stmt = conn.prepare("SELECT * FROM publications ORDER BY created_at DESC")?;
-        let publications = stmt.query_map([], |row| {
-            Ok(PlatformPublication {
-                id: row.get(0)?,
-                account_id: row.get(1)?,
-                platform: Self::parse_platform(row.get::<_, String>(2)?),
-                title: row.get(3)?,
-                description: row.get(4)?,
-                video_path: row.get(5)?,
-                cover_path: Some(row.get(6)?),
-                status: Self::parse_publication_status(row.get::<_, String>(7)?),
-                created_at: row.get(8)?,
-                published_at: Some(row.get(9)?),
-                publish_url: Some(row.get(10)?),
-                stats: PublicationStats {
-                    comments: row.get::<_, String>(11)?.parse().unwrap_or(0),
-                    likes: row.get::<_, String>(12)?.parse().unwrap_or(0),
-                    favorites: row.get::<_, String>(13)?.parse().unwrap_or(0),
-                    shares: row.get::<_, String>(14)?.parse().unwrap_or(0),
-                },
-            })
-        })?.filter_map(|r| r.ok()).collect();
-
-        Ok(publications)
-    }
-
-    // ============================================================================
-    // New publication + accounts operations (主表+子表结构)
+    // 作品发布操作 (新结构：主表+子表)
     // ============================================================================
 
     /// Save a publication task (main table)
@@ -1113,5 +983,204 @@ impl DatabaseManager {
         )?;
 
         Ok(rows > 0)
+    }
+
+    // ============================================================================
+    // 评论操作
+    // ============================================================================
+
+    /// Save a comment to database
+    /// 保存评论到数据库
+    pub fn save_comment(&self, comment: &Comment) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        conn.execute(r#"
+            INSERT OR REPLACE INTO comments (
+                id, account_id, aweme_id, comment_id, user_id,
+                user_nickname, user_avatar, content,
+                like_count, reply_count, create_time, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#, &[
+            &comment.id,
+            &comment.account_id,
+            &comment.aweme_id,
+            &comment.comment_id,
+            &comment.user_id,
+            &comment.user_nickname,
+            &comment.user_avatar,
+            &comment.content,
+            &comment.like_count.to_string(),
+            &comment.reply_count.to_string(),
+            &comment.create_time,
+            &format!("{:?}", comment.status),
+            &comment.created_at,
+        ])?;
+
+        Ok(())
+    }
+
+    /// Save multiple comments in batch
+    /// 批量保存评论
+    pub fn save_comments_batch(&self, comments: &[Comment]) -> Result<(), rusqlite::Error> {
+        if comments.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.get_connection()?;
+
+        // Start transaction for batch insert
+        let tx = conn.transaction()?;
+
+        for comment in comments {
+            tx.execute(r#"
+                INSERT OR IGNORE INTO comments (
+                    id, account_id, aweme_id, comment_id, user_id,
+                    user_nickname, user_avatar, content,
+                    like_count, reply_count, create_time, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#, &[
+                &comment.id,
+                &comment.account_id,
+                &comment.aweme_id,
+                &comment.comment_id,
+                &comment.user_id,
+                &comment.user_nickname,
+                &comment.user_avatar,
+                &comment.content,
+                &comment.like_count.to_string(),
+                &comment.reply_count.to_string(),
+                &comment.create_time,
+                &format!("{:?}", comment.status),
+                &comment.created_at,
+            ])?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Get comments by aweme_id
+    /// 根据作品ID获取评论
+    pub fn get_comments_by_aweme_id(&self, aweme_id: &str) -> Result<Vec<Comment>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM comments WHERE aweme_id = ? ORDER BY create_time DESC")?;
+        let comments = stmt.query_map([aweme_id], |row| {
+            Ok(Comment {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                aweme_id: row.get(2)?,
+                comment_id: row.get(3)?,
+                user_id: row.get(4)?,
+                user_nickname: row.get(5)?,
+                user_avatar: row.get(6)?,
+                content: row.get(7)?,
+                like_count: row.get::<_, String>(8)?.parse().unwrap_or(0),
+                reply_count: row.get::<_, String>(9)?.parse().unwrap_or(0),
+                create_time: row.get(10)?,
+                status: Self::parse_comment_status(row.get::<_, String>(11)?),
+                created_at: row.get(12)?,
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(comments)
+    }
+
+    /// Get comments by account_id
+    /// 根据账号ID获取评论
+    pub fn get_comments_by_account_id(&self, account_id: &str) -> Result<Vec<Comment>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT * FROM comments WHERE account_id = ? ORDER BY create_time DESC")?;
+        let comments = stmt.query_map([account_id], |row| {
+            Ok(Comment {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                aweme_id: row.get(2)?,
+                comment_id: row.get(3)?,
+                user_id: row.get(4)?,
+                user_nickname: row.get(5)?,
+                user_avatar: row.get(6)?,
+                content: row.get(7)?,
+                like_count: row.get::<_, String>(8)?.parse().unwrap_or(0),
+                reply_count: row.get::<_, String>(9)?.parse().unwrap_or(0),
+                create_time: row.get(10)?,
+                status: Self::parse_comment_status(row.get::<_, String>(11)?),
+                created_at: row.get(12)?,
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(comments)
+    }
+
+    /// Get comments by aweme_id with pagination
+    /// 根据作品ID获取评论（分页）
+    pub fn get_comments_by_aweme_id_paginated(
+        &self,
+        aweme_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Comment>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT * FROM comments WHERE aweme_id = ? ORDER BY create_time DESC LIMIT ? OFFSET ?"
+        )?;
+        let comments = stmt.query_map([aweme_id, limit.to_string().as_str(), offset.to_string().as_str()], |row| {
+            Ok(Comment {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                aweme_id: row.get(2)?,
+                comment_id: row.get(3)?,
+                user_id: row.get(4)?,
+                user_nickname: row.get(5)?,
+                user_avatar: row.get(6)?,
+                content: row.get(7)?,
+                like_count: row.get::<_, String>(8)?.parse().unwrap_or(0),
+                reply_count: row.get::<_, String>(9)?.parse().unwrap_or(0),
+                create_time: row.get(10)?,
+                status: Self::parse_comment_status(row.get::<_, String>(11)?),
+                created_at: row.get(12)?,
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(comments)
+    }
+
+    /// Get comment count by aweme_id
+    /// 根据作品ID获取评论数量
+    pub fn get_comment_count(&self, aweme_id: &str) -> Result<i64, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM comments WHERE aweme_id = ?",
+            [aweme_id],
+            |row| row.get(0)
+        )?;
+
+        Ok(count)
+    }
+
+    /// Delete comments by aweme_id
+    /// 根据作品ID删除评论
+    pub fn delete_comments_by_aweme_id(&self, aweme_id: &str) -> Result<bool, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let rows = conn.execute(
+            "DELETE FROM comments WHERE aweme_id = ?",
+            [aweme_id],
+        )?;
+
+        Ok(rows > 0)
+    }
+
+    /// Parse comment status string
+    /// 解析评论状态字符串
+    fn parse_comment_status(s: String) -> CommentStatus {
+        match s.to_lowercase().as_str() {
+            "completed" => CommentStatus::Completed,
+            "failed" => CommentStatus::Failed,
+            _ => CommentStatus::Pending,
+        }
     }
 }

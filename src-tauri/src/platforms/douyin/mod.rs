@@ -10,9 +10,11 @@
 //! - [`douyin_client`] - HTTP客户端
 //! - [`video_uploader`] - 视频上传器
 //! - [`strategy`] - 发布策略（主入口）
+//! - [`comment_extractor`] - 评论提取器
 
-use crate::core::{Platform, PlatformType, PlatformError, UserAccount, PublishRequest as CorePublishRequest};
-use crate::platforms::traits::PublishStrategy;
+use crate::core::{Platform, PlatformType, PlatformError, UserAccount, PublishRequest as CorePublishRequest, CommentExtractResult};
+use crate::platforms::traits::{PublishStrategy, CommentExtractor};
+use crate::platforms::douyin::comment_extractor::DouyinCommentExtractor;
 use crate::storage::DatabaseManager;
 use std::sync::Arc;
 
@@ -22,6 +24,7 @@ pub mod signature_v4;
 pub mod douyin_client;
 pub mod video_uploader;
 pub mod strategy;
+pub mod comment_extractor;
 
 // 导出主要类型
 pub use self::strategy::DouyinPublishStrategy;
@@ -230,5 +233,74 @@ impl Platform for DouyinPlatform {
             sec_uid: None,
             local_data,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl CommentExtractor for DouyinPlatform {
+    /// 提取视频评论
+    async fn extract_comments(
+        &self,
+        account_id: &str,
+        aweme_id: &str,
+        max_count: i64,
+    ) -> Result<CommentExtractResult, PlatformError> {
+        tracing::info!(
+            "[Comment] 开始提取评论, account_id: {}, aweme_id: {}, max_count: {}",
+            account_id,
+            aweme_id,
+            max_count
+        );
+
+        // 检查db_manager是否可用
+        if self.db_manager.is_none() {
+            return Err(PlatformError::InvalidInput(
+                "平台未配置数据库连接".to_string(),
+            ));
+        }
+        let db_manager = self.db_manager.as_ref().unwrap();
+
+        // 获取账号信息
+        let account = match db_manager.get_account(account_id) {
+            Ok(Some(acc)) => acc,
+            Ok(None) => {
+                return Err(PlatformError::AccountNotFound(
+                    format!("账号不存在: {}", account_id),
+                ));
+            }
+            Err(e) => {
+                return Err(PlatformError::StorageError(
+                    format!("查询账号失败: {:?}", e),
+                ));
+            }
+        };
+
+        // 创建评论提取器
+        let extractor = DouyinCommentExtractor::from_params(&account.params)
+            .map_err(|e| PlatformError::InvalidCredentials(e.to_string()))?;
+
+        // 执行提取
+        let mut result = extractor.extract(aweme_id, max_count).await?;
+
+        // 设置account_id
+        for comment in &mut result.comments {
+            comment.account_id = account_id.to_string();
+        }
+
+        // 保存到数据库
+        if !result.comments.is_empty() {
+            if let Err(e) = db_manager.save_comments_batch(&result.comments) {
+                tracing::error!("[Comment] 保存评论失败: {:?}", e);
+                return Err(PlatformError::StorageError(
+                    format!("保存评论失败: {:?}", e),
+                ));
+            }
+            tracing::info!(
+                "[Comment] 成功保存 {} 条评论到数据库",
+                result.comments.len()
+            );
+        }
+
+        Ok(result)
     }
 }

@@ -3,12 +3,13 @@
 
 use crate::core::*;
 use crate::platforms::douyin::DouyinPlatform;
+use crate::platforms::traits::CommentExtractor;
 use crate::storage::{DatabaseManager, ExtractorConfig};
 use crate::browser::{BrowserAutomator, BrowserAuthResult, BrowserAuthStep};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use serde::Serialize;
-use crate::core::{PublicationTask, PublicationAccountDetail, PublicationTaskWithAccounts};
+use crate::core::{PublicationTask, PublicationAccountDetail, PublicationTaskWithAccounts, Comment, CommentExtractResult};
 
 // App state
 // 应用状态
@@ -864,89 +865,6 @@ pub fn publish_video(
     }
 }
 
-/// Publish a saved publication by ID
-/// 发布保存的作品
-#[tauri::command]
-pub fn publish_saved_video(
-    app: AppHandle,
-    publication_id: &str,
-) -> Result<PublishResult, String> {
-    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path.clone());
-
-    // Get the publication
-    let publication = match db_manager.get_publication(publication_id) {
-        Ok(Some(p)) => p,
-        Ok(None) => return Err("Publication not found".to_string()),
-        Err(e) => return Err(format!("Database error: {}", e)),
-    };
-
-    // Get the account
-    let _account = match db_manager.get_account(&publication.account_id) {
-        Ok(Some(acc)) => acc,
-        Ok(None) => return Err("Account not found".to_string()),
-        Err(e) => return Err(format!("Database error: {}", e)),
-    };
-
-    // Build publish request
-    let platform_str = format!("{:?}", publication.platform);
-    let request = PublishRequest {
-        account_id: publication.account_id.clone(),
-        video_path: publication.video_path.clone().into(),
-        cover_path: publication.cover_path.clone().map(|p| p.into()),
-        title: publication.title.clone(),
-        description: Some(publication.description.clone()),
-        hashtags: vec![],
-        visibility_type: 0,
-        download_allowed: 0,
-        timeout: 0,
-        record_id: None,
-        send_time: None,
-        music_info: None,
-        poi_id: None,
-        poi_name: None,
-        anchor: None,
-        extra_info: None,
-        platform_data: None,
-        progress_info: None,
-    };
-
-    // Publish based on platform
-    let result = match publication.platform {
-        PlatformType::Douyin => {
-            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-            let douyin_platform = DouyinPlatform::with_storage(db_manager.clone());
-            rt.block_on(async {
-                douyin_platform.publish_video(request).await
-            })
-            .map_err(|e| e.to_string())?
-        }
-        _ => return Err(format!("Unsupported platform: {}", platform_str)),
-    };
-
-    // Update publication status
-    let item_id = result.item_id.clone();
-    let updated_publication = PlatformPublication {
-        id: publication.id,
-        account_id: publication.account_id,
-        platform: publication.platform,
-        title: publication.title,
-        description: publication.description,
-        video_path: publication.video_path,
-        cover_path: publication.cover_path,
-        status: if result.success { PublicationStatus::Completed } else { PublicationStatus::Failed },
-        created_at: publication.created_at,
-        published_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-        publish_url: item_id.map(|id| format!("https://v.douyin.com/{}", id)),
-        stats: PublicationStats::default(),
-    };
-
-    db_manager.save_publication(&updated_publication)
-        .map_err(|e| e.to_string())?;
-
-    Ok(result)
-}
-
 // ============================================================================
 // Browser automation authentication commands
 // 浏览器自动化授权命令
@@ -1467,5 +1385,130 @@ pub async fn select_file_with_content(
         }
         None => Ok(None),
     }
+}
+
+// ============================================================================
+// Comment extraction commands
+// 评论提取命令
+// ============================================================================
+
+/// Extract comments from a video
+/// 从视频提取评论
+#[tauri::command]
+pub async fn extract_comments(
+    app: AppHandle,
+    detail_id: &str,  // publication_accounts 表的 id
+    aweme_id: &str,
+    max_count: i64,
+) -> Result<CommentExtractResult, String> {
+    tracing::info!("[Comment] Extracting comments: detail_id={}, aweme_id={}, max_count={}",
+        detail_id, aweme_id, max_count);
+
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = Arc::new(DatabaseManager::new(data_path));
+
+    // 先从 publication_accounts 表获取真正的 account_id
+    let publication_account = match db_manager.get_publication_account_detail(detail_id) {
+        Ok(Some(acc)) => acc,
+        Ok(None) => {
+            tracing::error!("[Comment] 发布账号详情不存在: {}", detail_id);
+            return Err(format!("Publication account not found: {}", detail_id));
+        }
+        Err(e) => {
+            tracing::error!("[Comment] 查询发布账号详情失败: {:?}", e);
+            return Err(format!("Failed to query publication account: {:?}", e));
+        }
+    };
+
+    let account_id = &publication_account.account_id;
+    tracing::info!("[Comment] 获取到真实的账号ID: {}", account_id);
+
+    // Get account info to determine platform
+    let account = match db_manager.get_account(account_id).map_err(|e| e.to_string())? {
+        Some(acc) => acc,
+        None => {
+            tracing::error!("[Comment] 账号不存在: {}", account_id);
+            return Err(format!("Account not found: {}", account_id));
+        }
+    };
+
+    tracing::info!("[Comment] 获取到账号: platform={:?}", account.platform);
+
+    // Extract based on platform
+    match account.platform {
+        PlatformType::Douyin => {
+            tracing::info!("[Comment] 创建 DouyinPlatform 并开始提取");
+            let douyin_platform = DouyinPlatform::with_storage((*db_manager).clone());
+            match douyin_platform.extract_comments(account_id, aweme_id, max_count).await {
+                Ok(result) => {
+                    tracing::info!("[Comment] 提取成功: {} 条评论", result.comments.len());
+                    Ok(result)
+                }
+                Err(e) => {
+                    tracing::error!("[Comment] 提取失败: {:?}", e);
+                    Err(e.to_string())
+                }
+            }
+        }
+        _ => {
+            tracing::error!("[Comment] 不支持的平台: {:?}", account.platform);
+            Err(format!("Unsupported platform for comment extraction: {:?}", account.platform))
+        }
+    }
+}
+
+/// Get comments by aweme_id
+/// 根据作品ID获取评论
+#[tauri::command]
+pub fn get_comments_by_aweme_id(app: AppHandle, aweme_id: &str) -> Result<Vec<Comment>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_comments_by_aweme_id(aweme_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get comments by account_id
+/// 根据账号ID获取评论
+#[tauri::command]
+pub fn get_comments_by_account_id(app: AppHandle, account_id: &str) -> Result<Vec<Comment>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_comments_by_account_id(account_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get comments by aweme_id with pagination
+/// 根据作品ID获取评论（分页）
+#[tauri::command]
+pub fn get_comments_by_aweme_id_paginated(
+    app: AppHandle,
+    aweme_id: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<Comment>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_comments_by_aweme_id_paginated(aweme_id, offset, limit)
+        .map_err(|e| e.to_string())
+}
+
+/// Get comment count by aweme_id
+/// 根据作品ID获取评论数量
+#[tauri::command]
+pub fn get_comment_count(app: AppHandle, aweme_id: &str) -> Result<i64, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.get_comment_count(aweme_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete comments by aweme_id
+/// 根据作品ID删除评论
+#[tauri::command]
+pub fn delete_comments(app: AppHandle, aweme_id: &str) -> Result<bool, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.delete_comments_by_aweme_id(aweme_id)
+        .map_err(|e| e.to_string())
 }
 

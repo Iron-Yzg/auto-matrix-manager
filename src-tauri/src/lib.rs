@@ -109,13 +109,19 @@ pub fn run() {
             publish_publication_task,
             retry_publication_task,
             publish_video,
-            publish_saved_video,
             start_browser_auth,
             check_browser_auth_status,
             cancel_browser_auth,
             get_extractor_configs,
             get_extractor_config,
             save_extractor_config,
+            // Comment extraction commands
+            extract_comments,
+            get_comments_by_aweme_id,
+            get_comments_by_account_id,
+            get_comments_by_aweme_id_paginated,
+            get_comment_count,
+            delete_comments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

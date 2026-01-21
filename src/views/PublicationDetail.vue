@@ -79,7 +79,14 @@ const goBack = () => router.back()
 
 // Open comments page
 const openComments = (account: any) => {
-  router.push(`/comments/${account.id}`)
+  router.push({
+    path: '/comments',
+    query: {
+      id: account.id,
+      awemeId: account.itemId || '',
+      accountName: account.accountName || ''
+    }
+  })
 }
 
 // 发布/重发
