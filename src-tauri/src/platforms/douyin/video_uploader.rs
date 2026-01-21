@@ -629,40 +629,31 @@ impl VideoUploader {
 
         let params_for_url = params.clone();
 
-        // 构建Functions
-        let functions = vec![
-            vec![("name".to_string(), "GetMeta".to_string())],
-            vec![
-                ("name".to_string(), "Snapshot".to_string()),
-                ("payload".to_string(), "{\"ServiceType\":\"cos\"}".to_string()),
-            ],
-        ];
+        // 构建Functions - 与Java完全一致
+        let functions = serde_json::json!([
+            {"name": "GetMeta"},
+            {"name": "Snapshot", "input": {"SnapshotTime": 0}}
+        ]);
 
-        let mut functions_arr = Vec::new();
-        for func in &functions {
-            let mut func_obj = serde_json::Map::new();
-            for (k, v) in func {
-                func_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
-            }
-            functions_arr.push(serde_json::Value::Object(func_obj));
-        }
-
+        // 构建Body - 与Java完全一致
+        // 注意：Java使用"SessionKey"（大写K），不是"session_key"
         let body = serde_json::json!({
-            "Functions": functions_arr,
-            "SpaceName": "aweme",
-            "app_id": 2906,
-            "session_key": session_key,
-            "user_id": self.third_id
+            "SessionKey": session_key,
+            "Functions": functions
         });
 
+        // 构建Headers - 与Java完全一致
         let mut headers: HashMap<String, String> = HashMap::new();
         headers.insert("User-Agent".to_string(), self.user_agent.clone());
         headers.insert("Referer".to_string(), "https://creator.douyin.com/".to_string());
-        headers.insert("Sec-Gpc".to_string(), "1".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        // 注意：Java没有Sec-Gpc头
 
         let mut signer = SignatureV4::new();
         let credentials = self.build_credentials();
         let body_bytes = serde_json::to_string(&body).unwrap_or_default().as_bytes().to_vec();
+
+        tracing::debug!("[Commit] Body: {}", serde_json::to_string(&body).unwrap_or_default());
 
         // 使用douyin_1的签名接口（返回Result）
         let signed_headers = signer.sign_request_headers("POST", VOD_API_URL, &params, &headers, &body_bytes, &credentials)
@@ -672,6 +663,12 @@ impl VideoUploader {
         let response_body = self.send_signed_post_request(&url, &signed_headers, &body_bytes).await?;
 
         tracing::debug!("提交上传响应: {}", response_body);
+
+        // 检查响应是否有错误
+        let result: Value = serde_json::from_str(&response_body)
+            .map_err(|e| format!("解析JSON失败: {}", e))?;
+        self.check_error(&result)?;
+
         Ok(())
     }
 
