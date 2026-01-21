@@ -107,6 +107,7 @@ pub fn run() {
             create_publication_task,
             delete_publication_task,
             publish_publication_task,
+            retry_publication_task,
             publish_video,
             publish_saved_video,
             start_browser_auth,

@@ -32,7 +32,7 @@
 //!
 //! 本模块完全对应Java中的 `DouyinPublishStrategy.java`
 
-use crate::core::{PlatformError, PublishResult, PublishRequest as CorePublishRequest};
+use crate::core::{PlatformError, PublishResult, PublishRequest as CorePublishRequest, ProgressStatus, PublishProgressEvent};
 use crate::platforms::traits::PublishStrategy;
 use crate::platforms::douyin::account_params::AccountParams;
 use crate::platforms::douyin::douyin_client::DouyinClient;
@@ -44,6 +44,8 @@ use crate::platforms::douyin::video_uploader::VideoUploader;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tauri::Emitter;
+use chrono::Utc;
 
 /// 平台类型标识
 /// 1 = 抖音
@@ -98,13 +100,63 @@ impl DouyinPublishConfig {
 /// # 与Java代码对照
 ///
 /// - `DouyinPublishStrategy.java` (588行)
-#[derive(Debug, Clone, Default)]
-pub struct DouyinPublishStrategy;
+#[derive(Debug, Clone)]
+pub struct DouyinPublishStrategy {
+    /// 任务ID
+    task_id: String,
+    /// 详情ID
+    detail_id: String,
+    /// 账号ID
+    account_id: String,
+    /// AppHandle 用于发送进度事件
+    app_handle: Option<tauri::AppHandle>,
+}
 
 impl DouyinPublishStrategy {
-    /// 创建新的发布策略实例
+    /// 创建新的发布策略实例（无进度跟踪）
     pub fn new() -> Self {
-        Self
+        Self {
+            task_id: String::new(),
+            detail_id: String::new(),
+            account_id: String::new(),
+            app_handle: None,
+        }
+    }
+
+    /// 创建带进度跟踪的发布策略实例
+    pub fn with_progress(
+        task_id: &str,
+        detail_id: &str,
+        account_id: &str,
+        app_handle: &tauri::AppHandle,
+    ) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            detail_id: detail_id.to_string(),
+            account_id: account_id.to_string(),
+            app_handle: Some(app_handle.clone()),
+        }
+    }
+
+    /// 发送进度事件
+    fn emit_progress(&self, status: &ProgressStatus, message: &str, progress: i32) {
+        if let Some(handle) = &self.app_handle {
+            let event = PublishProgressEvent {
+                task_id: self.task_id.clone(),
+                detail_id: self.detail_id.clone(),
+                account_id: self.account_id.clone(),
+                platform: "douyin".to_string(),
+                status: status.clone(),
+                message: message.to_string(),
+                progress,
+                timestamp: Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = handle.emit("publish-progress", &event) {
+                tracing::warn!("[Progress] Failed to emit progress event: {}", e);
+            } else {
+                tracing::info!("[Progress] ✅ Emitted: status={:?}, progress={}%, message={}", status, progress, message);
+            }
+        }
     }
 }
 
@@ -141,6 +193,7 @@ impl PublishStrategy for DouyinPublishStrategy {
     async fn publish(&self, request: CorePublishRequest) -> Result<PublishResult, PlatformError> {
         // ========== 步骤1: 参数校验 ==========
         tracing::info!("[Publish] ====== 步骤1: 参数校验 ======");
+        self.emit_progress(&ProgressStatus::Starting, "开始发布", 0);
 
         if request.video_path.as_os_str().is_empty() {
             return Err(PlatformError::InvalidInput("视频路径不能为空".to_string()));
@@ -186,6 +239,7 @@ impl PublishStrategy for DouyinPublishStrategy {
 
         // ========== 步骤4: 申请上传地址和凭证 (V4签名) ==========
         tracing::info!("[Publish] ====== 步骤4: 申请上传地址和凭证 ======");
+        self.emit_progress(&ProgressStatus::UploadingVideo, "上传视频中...", 10);
 
         // 验证视频文件
         if !request.video_path.exists() {
@@ -202,6 +256,7 @@ impl PublishStrategy for DouyinPublishStrategy {
 
         // ========== 步骤5: 获取BD凭证 ==========
         tracing::info!("[Publish] ====== 步骤5: 获取BD凭证 ======");
+        self.emit_progress(&ProgressStatus::GettingTicket, "获取发布凭证...", 60);
 
         let bd_ticket = client
             .get_header_ticket_key("video")
@@ -244,6 +299,7 @@ impl PublishStrategy for DouyinPublishStrategy {
 
         // ========== 步骤9: 发布视频 ==========
         tracing::info!("[Publish] ====== 步骤9: 发布视频到抖音 ======");
+        self.emit_progress(&ProgressStatus::Publishing, "发布中...", 80);
 
         let post_result = client
             .get_public_video_v2(publish_data, Some(csrf_token), Some(bd_ticket))
@@ -254,6 +310,8 @@ impl PublishStrategy for DouyinPublishStrategy {
         let item_id = self.get_item_id_from_result(&post_result);
 
         tracing::info!("抖音视频发布成功, itemId: {}", item_id);
+
+        self.emit_progress(&ProgressStatus::Completed, "发布成功", 100);
 
         Ok(PublishResult {
             success: true,

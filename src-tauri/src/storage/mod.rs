@@ -138,6 +138,16 @@ impl DatabaseManager {
                 )
                 WHERE account_name = '' OR account_name IS NULL
             "#)?;
+
+            // Migration: Add message column (失败原因记录)
+            if !columns.contains(&"message".to_string()) {
+                conn.execute_batch("ALTER TABLE publication_accounts ADD COLUMN message TEXT DEFAULT ''")?;
+            }
+
+            // Migration: Add item_id column (发布的视频ID)
+            if !columns.contains(&"item_id".to_string()) {
+                conn.execute_batch("ALTER TABLE publication_accounts ADD COLUMN item_id TEXT DEFAULT ''")?;
+            }
         }
 
         // Platform extractor configs table - 平台数据提取引擎配置
@@ -444,8 +454,9 @@ impl DatabaseManager {
             INSERT OR REPLACE INTO publication_accounts (
                 id, publication_task_id, account_id, account_name, platform, status,
                 created_at, published_at, publish_url,
-                comments, likes, favorites, shares
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                comments, likes, favorites, shares,
+                message, item_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#, &[
             &detail.id,
             &detail.publication_task_id,
@@ -460,6 +471,8 @@ impl DatabaseManager {
             &detail.stats.likes.to_string(),
             &detail.stats.favorites.to_string(),
             &detail.stats.shares.to_string(),
+            detail.message.as_ref().unwrap_or(&String::new()),
+            detail.item_id.as_ref().unwrap_or(&String::new()),
         ])?;
 
         Ok(())
@@ -500,8 +513,9 @@ impl DatabaseManager {
                 INSERT OR REPLACE INTO publication_accounts (
                     id, publication_task_id, account_id, account_name, platform, status,
                     created_at, published_at, publish_url,
-                    comments, likes, favorites, shares
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    comments, likes, favorites, shares,
+                    message, item_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#, &[
                 &detail.id,
                 &detail.publication_task_id,
@@ -516,6 +530,8 @@ impl DatabaseManager {
                 &detail.stats.likes.to_string(),
                 &detail.stats.favorites.to_string(),
                 &detail.stats.shares.to_string(),
+                detail.message.as_ref().unwrap_or(&String::new()),
+                detail.item_id.as_ref().unwrap_or(&String::new()),
             ])?;
         }
 
@@ -577,6 +593,8 @@ impl DatabaseManager {
         // Get all account details (without title/description/hashtags)
         let mut acc_stmt = conn.prepare("SELECT * FROM publication_accounts")?;
         let accounts: Vec<PublicationAccountDetail> = acc_stmt.query_map([], |row| {
+            let message: String = row.get(13)?;
+            let item_id: String = row.get(14)?;
             Ok(PublicationAccountDetail {
                 id: row.get(0)?,
                 publication_task_id: row.get(1)?,
@@ -593,6 +611,8 @@ impl DatabaseManager {
                     favorites: row.get(11)?,
                     shares: row.get(12)?,
                 },
+                message: if message.is_empty() { None } else { Some(message) },
+                item_id: if item_id.is_empty() { None } else { Some(item_id) },
             })
         })?.filter_map(|r| r.ok()).collect();
 
@@ -631,6 +651,8 @@ impl DatabaseManager {
         let mut stmt = conn.prepare("SELECT * FROM publication_accounts WHERE id = ?")?;
 
         match stmt.query_row([detail_id], |row| {
+            let message: String = row.get(13)?;
+            let item_id: String = row.get(14)?;
             Ok(PublicationAccountDetail {
                 id: row.get(0)?,
                 publication_task_id: row.get(1)?,
@@ -647,6 +669,8 @@ impl DatabaseManager {
                     favorites: row.get(11)?,
                     shares: row.get(12)?,
                 },
+                message: if message.is_empty() { None } else { Some(message) },
+                item_id: if item_id.is_empty() { None } else { Some(item_id) },
             })
         }) {
             Ok(detail) => Ok(Some(detail)),
@@ -677,18 +701,27 @@ impl DatabaseManager {
 
     /// Update publication account detail status
     /// 更新账号发布详情状态
-    pub fn update_publication_account_status(&self, detail_id: &str, status: PublicationStatus, publish_url: Option<String>) -> Result<(), rusqlite::Error> {
+    pub fn update_publication_account_status(
+        &self,
+        detail_id: &str,
+        status: PublicationStatus,
+        publish_url: Option<String>,
+        message: Option<String>,
+        item_id: Option<String>,
+    ) -> Result<(), rusqlite::Error> {
         let conn = self.get_connection()?;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         conn.execute(r#"
             UPDATE publication_accounts
-            SET status = ?, published_at = ?, publish_url = ?
+            SET status = ?, published_at = ?, publish_url = ?, message = ?, item_id = ?
             WHERE id = ?
         "#, &[
             &format!("{:?}", status),
             &now,
             publish_url.as_ref().unwrap_or(&String::new()),
+            message.as_ref().unwrap_or(&String::new()),
+            item_id.as_ref().unwrap_or(&String::new()),
             detail_id,
         ])?;
 
@@ -709,10 +742,13 @@ impl DatabaseManager {
         // Get account details - use explicit column names to avoid issues with column order
         let mut acc_stmt = conn.prepare("
             SELECT id, publication_task_id, account_id, account_name, platform, status,
-                   created_at, published_at, publish_url, comments, likes, favorites, shares
+                   created_at, published_at, publish_url, comments, likes, favorites, shares,
+                   message, item_id
             FROM publication_accounts WHERE publication_task_id = ?
         ")?;
         let accounts: Vec<PublicationAccountDetail> = acc_stmt.query_map([task_id], |row| {
+            let message: String = row.get(13)?;
+            let item_id: String = row.get(14)?;
             Ok(PublicationAccountDetail {
                 id: row.get(0)?,
                 publication_task_id: row.get(1)?,
@@ -729,6 +765,8 @@ impl DatabaseManager {
                     favorites: row.get(11)?,
                     shares: row.get(12)?,
                 },
+                message: if message.is_empty() { None } else { Some(message) },
+                item_id: if item_id.is_empty() { None } else { Some(item_id) },
             })
         })?.filter_map(|r| r.ok()).collect();
 
@@ -744,6 +782,131 @@ impl DatabaseManager {
             published_at: task.published_at.unwrap_or_default(),
             accounts,
         }))
+    }
+
+    /// Update main task status based on all account statuses
+    /// 根据所有子表状态更新主表状态
+    /// 状态规则：
+    /// - 如果所有子表都是 Draft -> 主表 Draft
+    /// - 如果有任意子表是 Publishing -> 主表 Publishing
+    /// - 如果所有子表都完成（Completed 或 Failed）：
+    ///   - 如果至少有一个 Completed -> 主表 Completed
+    ///   - 如果全部 Failed -> 主表 Failed
+    pub fn update_task_status_from_accounts(&self, task_id: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("SELECT status FROM publication_accounts WHERE publication_task_id = ?")?;
+        let statuses: Vec<String> = stmt.query_map([task_id], |row| Ok(row.get(0)?))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if statuses.is_empty() {
+            return Ok(());
+        }
+
+        let new_status = Self::calculate_task_status(&statuses);
+
+        conn.execute(
+            "UPDATE publication_tasks SET status = ? WHERE id = ?",
+            [&format!("{:?}", new_status), task_id],
+        )?;
+
+        Ok(())
+    }
+
+    /// Calculate task status from account statuses
+    /// 根据子表状态列表计算主表状态
+    fn calculate_task_status(account_statuses: &[String]) -> PublicationStatus {
+        let mut has_publishing = false;
+        let mut has_completed = false;
+        let mut has_failed = false;
+
+        for status in account_statuses {
+            match status.to_lowercase().as_str() {
+                "draft" => {}
+                "publishing" => has_publishing = true,
+                "completed" => has_completed = true,
+                "failed" => has_failed = true,
+                _ => {}
+            }
+        }
+
+        if has_publishing {
+            PublicationStatus::Publishing
+        } else if has_completed {
+            PublicationStatus::Completed
+        } else if has_failed {
+            PublicationStatus::Failed
+        } else {
+            PublicationStatus::Draft
+        }
+    }
+
+    /// Reset account status for retry (set Draft and clear message)
+    /// 重置账号状态用于重发
+    pub fn reset_account_for_retry(&self, detail_id: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        conn.execute(r#"
+            UPDATE publication_accounts
+            SET status = 'draft', message = '', item_id = '', published_at = '', publish_url = ''
+            WHERE id = ?
+        "#, [detail_id])?;
+
+        Ok(())
+    }
+
+    /// Get accounts that need retry (Draft or Failed status)
+    /// 获取需要重发的账号列表
+    pub fn get_accounts_for_retry(&self, task_id: &str) -> Result<Vec<PublicationAccountDetail>, rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        let mut stmt = conn.prepare("
+            SELECT id, publication_task_id, account_id, account_name, platform, status,
+                   created_at, published_at, publish_url, comments, likes, favorites, shares,
+                   message, item_id
+            FROM publication_accounts
+            WHERE publication_task_id = ? AND status IN ('draft', 'failed')
+        ")?;
+
+        let accounts: Vec<PublicationAccountDetail> = stmt.query_map([task_id], |row| {
+            let message: String = row.get(13)?;
+            let item_id: String = row.get(14)?;
+            Ok(PublicationAccountDetail {
+                id: row.get(0)?,
+                publication_task_id: row.get(1)?,
+                account_id: row.get(2)?,
+                account_name: row.get(3)?,
+                platform: Self::parse_platform(row.get::<_, String>(4)?),
+                status: Self::parse_publication_status(row.get::<_, String>(5)?),
+                created_at: row.get(6)?,
+                published_at: Some(row.get(7)?),
+                publish_url: Some(row.get(8)?),
+                stats: PublicationStats {
+                    comments: row.get(9)?,
+                    likes: row.get(10)?,
+                    favorites: row.get(11)?,
+                    shares: row.get(12)?,
+                },
+                message: if message.is_empty() { None } else { Some(message) },
+                item_id: if item_id.is_empty() { None } else { Some(item_id) },
+            })
+        })?.filter_map(|r| r.ok()).collect();
+
+        Ok(accounts)
+    }
+
+    /// Update main task status
+    /// 直接更新主表状态
+    pub fn update_publication_task_status(&self, task_id: &str, status: PublicationStatus) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        conn.execute(
+            "UPDATE publication_tasks SET status = ? WHERE id = ?",
+            [&format!("{:?}", status), task_id],
+        )?;
+
+        Ok(())
     }
 
     // ============================================================================

@@ -156,8 +156,13 @@ impl Platform for DouyinPlatform {
             }
         }
 
-        // 使用发布策略
-        let strategy = DouyinPublishStrategy::new();
+        // 使用发布策略（带进度跟踪）
+        let strategy = match &request.progress_info {
+            Some((task_id, detail_id, account_id, app_handle)) => {
+                DouyinPublishStrategy::with_progress(task_id, detail_id, account_id, app_handle)
+            }
+            None => DouyinPublishStrategy::new(),
+        };
         tracing::info!("[Publish] 开始调用发布策略，third_id前20字符: {}...", &third_id[..third_id.len().min(20)]);
 
         // 构造带有平台数据的请求
@@ -179,6 +184,7 @@ impl Platform for DouyinPlatform {
             anchor: request.anchor.clone(),
             extra_info: request.extra_info.clone(),
             platform_data: Some(platform_data),
+            progress_info: None,
         };
 
         let result = strategy.publish(platform_request).await;

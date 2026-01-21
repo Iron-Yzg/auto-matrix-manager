@@ -266,6 +266,8 @@ pub fn create_publication_task(
             published_at: None,
             publish_url: None,
             stats: PublicationStats::default(),
+            message: None,
+            item_id: None,
         };
 
         account_details.push(detail);
@@ -329,30 +331,44 @@ pub struct PublishTaskResult {
     pub error: Option<String>,
 }
 
-/// Publish a publication task to all accounts
-/// 发布作品到所有账号
+/// Result of publishing progress (for frontend updates)
+/// 发布进度结果（用于前端更新）
+#[derive(Serialize, Clone)]
+pub struct PublishProgressResult {
+    pub total_accounts: usize,
+    pub completed_accounts: usize,
+    pub success_count: usize,
+    pub failed_count: usize,
+    pub results: Vec<PublishTaskResult>,
+}
+
+/// Publish a publication task to all accounts (concurrent/async)
+/// 发布作品到所有账号（异步并发）
 #[tauri::command]
 pub async fn publish_publication_task(
-    app: AppHandle,
+    window: tauri::Window,
     task_id: &str,
     _title: &str,
     _description: &str,
     _video_path: &str,
     _hashtags: Vec<String>,
-) -> Result<Vec<PublishTaskResult>, String> {
-    eprintln!("[Publish] Starting publish for task: {}", task_id);
-    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path.clone());
+) -> Result<PublishProgressResult, String> {
+    tracing::info!("[Publish] Starting concurrent publish for task: {}", task_id);
+
+    // 使用 app_handle 发送进度事件到所有窗口
+    let app_handle = window.app_handle().clone();
+    let data_path = app_handle.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = Arc::new(DatabaseManager::new(data_path.clone()));
 
     // Get the task with accounts
     let task = match db_manager.get_publication_task_with_accounts(task_id).map_err(|e| e.to_string())? {
         Some(t) => t,
         None => {
-            eprintln!("[Publish] Task not found: {}", task_id);
+            tracing::error!("[Publish] Task not found: {}", task_id);
             return Err("Task not found".to_string());
         }
     };
-    eprintln!("[Publish] Found task with {} accounts", task.accounts.len());
+    tracing::info!("[Publish] Found task with {} accounts", task.accounts.len());
 
     // Get main task for video path and title
     let main_task = match db_manager.get_publication_task(task_id).map_err(|e| e.to_string())? {
@@ -360,123 +376,424 @@ pub async fn publish_publication_task(
         None => return Err("Task not found".to_string()),
     };
 
-    let mut results = Vec::new();
+    // Filter accounts that need publishing (not already completed)
+    let accounts_to_publish: Vec<_> = task.accounts.iter()
+        .filter(|acc| acc.status != PublicationStatus::Completed)
+        .collect();
 
-    // Publish to each account
-    for account_detail in &task.accounts {
-        eprintln!("[Publish] Processing account: {}, platform: {:?}", account_detail.account_id, account_detail.platform);
-        // Skip if already published
-        if account_detail.status == PublicationStatus::Completed {
-            eprintln!("[Publish] Account {} already published, skipping", account_detail.account_id);
-            results.push(PublishTaskResult {
+    if accounts_to_publish.is_empty() {
+        tracing::info!("[Publish] All accounts already published, skipping");
+        return Ok(PublishProgressResult {
+            total_accounts: task.accounts.len(),
+            completed_accounts: task.accounts.len(),
+            success_count: task.accounts.len(),
+            failed_count: 0,
+            results: task.accounts.iter().map(|acc| PublishTaskResult {
                 success: true,
-                detail_id: account_detail.id.clone(),
-                publish_url: account_detail.publish_url.clone(),
+                detail_id: acc.id.clone(),
+                publish_url: acc.publish_url.clone(),
                 error: None,
-            });
-            continue;
-        }
-
-        // Get the account (unused but kept for future use)
-        let _account = match db_manager.get_account(&account_detail.account_id).map_err(|e| e.to_string())? {
-            Some(acc) => acc,
-            None => {
-                eprintln!("[Publish] Account not found: {}", account_detail.account_id);
-                results.push(PublishTaskResult {
-                    success: false,
-                    detail_id: account_detail.id.clone(),
-                    publish_url: None,
-                    error: Some("Account not found".to_string()),
-                });
-                continue;
-            }
-        };
-
-        // Build publish request
-        let platform_str = format!("{:?}", account_detail.platform);
-        eprintln!("[Publish] Building request for platform: {}", platform_str);
-        let request = PublishRequest {
-            account_id: account_detail.account_id.clone(),
-            video_path: main_task.video_path.clone().into(),
-            cover_path: main_task.cover_path.clone().map(|p| p.into()),
-            title: main_task.title.clone(),
-            description: main_task.description.clone(),
-            hashtags: main_task.hashtags.clone(),
-            visibility_type: 0,
-            download_allowed: 0,
-            timeout: 0,
-            record_id: None,
-            send_time: None,
-            music_info: None,
-            poi_id: None,
-            poi_name: None,
-            anchor: None,
-            extra_info: None,
-            platform_data: None,
-        };
-
-        // Publish based on platform
-        let publish_result = match account_detail.platform {
-            PlatformType::Douyin => {
-                eprintln!("[Publish] Starting Douyin publish...");
-                let douyin_platform = DouyinPlatform::with_storage(db_manager.clone());
-                // 注意：直接使用 .await，不需要手动创建 runtime
-                // 因为 publish_publication_task 本身是 async 函数，已经在 runtime 中
-                match douyin_platform.publish_video(request).await {
-                    Ok(r) => {
-                        eprintln!("[Publish] Douyin publish success: {}", r.success);
-                        r
-                    }
-                    Err(e) => {
-                        eprintln!("[Publish] Douyin publish error: {}", e);
-                        results.push(PublishTaskResult {
-                            success: false,
-                            detail_id: account_detail.id.clone(),
-                            publish_url: None,
-                            error: Some(e.to_string()),
-                        });
-                        continue;
-                    }
-                }
-            }
-            _ => {
-                results.push(PublishTaskResult {
-                    success: false,
-                    detail_id: account_detail.id.clone(),
-                    publish_url: None,
-                    error: Some(format!("Unsupported platform: {}", platform_str)),
-                });
-                continue;
-            }
-        };
-
-        // Update status
-        let publish_url = publish_result.item_id.clone()
-            .map(|id| format!("https://v.douyin.com/{}", id));
-
-        let new_status = if publish_result.success {
-            PublicationStatus::Completed
-        } else {
-            PublicationStatus::Failed
-        };
-
-        if let Err(e) = db_manager.update_publication_account_status(
-            &account_detail.id,
-            new_status,
-            publish_url.clone(),
-        ) {
-            eprintln!("Failed to update status: {}", e);
-        }
-
-        results.push(PublishTaskResult {
-            success: publish_result.success,
-            detail_id: account_detail.id.clone(),
-            publish_url,
-            error: publish_result.error_message,
+            }).collect(),
         });
     }
 
-    Ok(results)
+    // Update main task status to Publishing
+    db_manager.update_publication_task_status(task_id, PublicationStatus::Publishing)
+        .map_err(|e| e.to_string())?;
+
+    // Prepare shared data for concurrent publishing
+    let video_path = main_task.video_path.clone();
+    let cover_path = main_task.cover_path.clone();
+    let title = main_task.title.clone();
+    let description = main_task.description.clone();
+    let hashtags = main_task.hashtags.clone();
+
+    // Use tokio::spawn for concurrent publishing
+    // Limit concurrency to avoid overwhelming the system
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(3));
+    let app_handle_for_progress = app_handle.clone();
+    let task_id_str = task_id.to_string();
+    let mut handles = Vec::new();
+
+    for account_detail in accounts_to_publish {
+        let db_manager = db_manager.clone();
+        let semaphore = semaphore.clone();
+        let video_path = video_path.clone();
+        let cover_path = cover_path.clone();
+        let title = title.clone();
+        let description = description.clone();
+        let hashtags = hashtags.clone();
+        let account_detail = account_detail.clone();
+        let app_handle_for_progress = app_handle_for_progress.clone();
+        let task_id = task_id_str.clone();
+
+        let handle = tokio::spawn(async move {
+            // Acquire permit before publishing
+            let _permit = semaphore.acquire().await.unwrap();
+
+            let detail_id = account_detail.id.clone();
+            let platform = account_detail.platform;
+            let account_id = account_detail.account_id.clone();
+
+            tracing::info!("[Publish] Starting publish for account: {}, platform: {:?}", account_id, platform);
+
+            // Build publish request with progress info
+            let request = PublishRequest {
+                account_id: account_id.clone(),
+                video_path: video_path.clone().into(),
+                cover_path: cover_path.clone().map(|p| p.into()),
+                title: title.clone(),
+                description: description.clone(),
+                hashtags: hashtags.clone(),
+                visibility_type: 0,
+                download_allowed: 0,
+                timeout: 0,
+                record_id: None,
+                send_time: None,
+                music_info: None,
+                poi_id: None,
+                poi_name: None,
+                anchor: None,
+                extra_info: None,
+                platform_data: None,
+                progress_info: Some((task_id.clone(), detail_id.clone(), account_id.clone(), app_handle_for_progress.clone())),
+            };
+
+            // Publish based on platform
+            let publish_result = match platform {
+                PlatformType::Douyin => {
+                    let douyin_platform = DouyinPlatform::with_storage((*db_manager).clone());
+                    douyin_platform.publish_video(request).await
+                }
+                _ => {
+                    return PublishTaskResult {
+                        success: false,
+                        detail_id,
+                        publish_url: None,
+                        error: Some(format!("Unsupported platform: {:?}", platform)),
+                    };
+                }
+            };
+
+            // Process result
+            match publish_result {
+                Ok(result) => {
+                    let publish_url = result.item_id.clone()
+                        .map(|id| format!("https://v.douyin.com/{}", id));
+
+                    let new_status = if result.success {
+                        PublicationStatus::Completed
+                    } else {
+                        PublicationStatus::Failed
+                    };
+
+                    // Update account status with message and item_id
+                    let message = result.error_message.clone();
+                    let item_id = result.item_id.clone();
+
+                    if let Err(e) = db_manager.update_publication_account_status(
+                        &detail_id,
+                        new_status,
+                        publish_url.clone(),
+                        message.clone(),
+                        item_id.clone(),
+                    ) {
+                        tracing::error!("[Publish] Failed to update status for {}: {}", detail_id, e);
+                    }
+
+                    // 进度事件由 strategy.rs 中的 emit_progress 发送
+
+                    PublishTaskResult {
+                        success: result.success,
+                        detail_id,
+                        publish_url,
+                        error: message,
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    tracing::error!("[Publish] Publish failed for {}: {}", detail_id, error_msg);
+
+                    // Update account status with error message
+                    if let Err(e2) = db_manager.update_publication_account_status(
+                        &detail_id,
+                        PublicationStatus::Failed,
+                        None,
+                        Some(error_msg.clone()),
+                        None,
+                    ) {
+                        tracing::error!("[Publish] Failed to update status for {}: {}", detail_id, e2);
+                    }
+
+                    // 进度事件由 strategy.rs 中的 emit_progress 发送
+
+                    PublishTaskResult {
+                        success: false,
+                        detail_id,
+                        publish_url: None,
+                        error: Some(error_msg),
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all publishes to complete
+    let mut results: Vec<PublishTaskResult> = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                tracing::error!("[Publish] Task panicked: {}", e);
+                results.push(PublishTaskResult {
+                    success: false,
+                    detail_id: String::new(),
+                    publish_url: None,
+                    error: Some(format!("Publish task error: {}", e)),
+                });
+            }
+        }
+    }
+
+    // Calculate statistics
+    let success_count = results.iter().filter(|r| r.success).count();
+    let failed_count = results.len() - success_count;
+    let completed_accounts = task.accounts.len(); // All accounts accounted for
+
+    // Update main task status based on all account statuses
+    if let Err(e) = db_manager.update_task_status_from_accounts(task_id) {
+        tracing::error!("[Publish] Failed to update task status: {}", e);
+    }
+
+    tracing::info!("[Publish] Publish completed: {} success, {} failed", success_count, failed_count);
+
+    Ok(PublishProgressResult {
+        total_accounts: task.accounts.len(),
+        completed_accounts,
+        success_count,
+        failed_count,
+        results,
+    })
+}
+
+/// Retry publishing for failed or pending accounts
+/// 重发失败的或未发布的账号
+#[tauri::command]
+pub async fn retry_publication_task(
+    window: tauri::Window,
+    task_id: &str,
+) -> Result<PublishProgressResult, String> {
+    tracing::info!("[Retry] Starting retry publish for task: {}", task_id);
+
+    // 使用 app_handle 发送进度事件到所有窗口
+    let app_handle = window.app_handle().clone();
+    let data_path = app_handle.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = Arc::new(DatabaseManager::new(data_path.clone()));
+
+    // Get accounts that need retry (Draft or Failed status)
+    let accounts_to_retry = db_manager.get_accounts_for_retry(task_id)
+        .map_err(|e| e.to_string())?;
+
+    if accounts_to_retry.is_empty() {
+        tracing::info!("[Retry] No accounts need retry");
+        return Err("没有需要重发的账号".to_string());
+    }
+
+    tracing::info!("[Retry] Found {} accounts to retry", accounts_to_retry.len());
+
+    // Reset account statuses to Draft for retry
+    for account in &accounts_to_retry {
+        if let Err(e) = db_manager.reset_account_for_retry(&account.id) {
+            tracing::error!("[Retry] Failed to reset account {}: {}", account.id, e);
+        }
+    }
+
+    // Update main task status to Publishing
+    db_manager.update_publication_task_status(task_id, PublicationStatus::Publishing)
+        .map_err(|e| e.to_string())?;
+
+    // Get main task for video path and title
+    let main_task = match db_manager.get_publication_task(task_id).map_err(|e| e.to_string())? {
+        Some(t) => t,
+        None => return Err("Task not found".to_string()),
+    };
+
+    // Prepare shared data for concurrent publishing
+    let video_path = main_task.video_path.clone();
+    let cover_path = main_task.cover_path.clone();
+    let title = main_task.title.clone();
+    let description = main_task.description.clone();
+    let hashtags = main_task.hashtags.clone();
+
+    // Use tokio::spawn for concurrent publishing
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(3));
+    let app_handle_for_progress = app_handle.clone();
+    let task_id_str = task_id.to_string();
+    let mut handles = Vec::new();
+
+    for account_detail in accounts_to_retry {
+        let db_manager = db_manager.clone();
+        let semaphore = semaphore.clone();
+        let video_path = video_path.clone();
+        let cover_path = cover_path.clone();
+        let title = title.clone();
+        let description = description.clone();
+        let hashtags = hashtags.clone();
+        let app_handle_for_progress = app_handle_for_progress.clone();
+        let task_id = task_id_str.clone();
+
+        let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+
+            let detail_id = account_detail.id.clone();
+            let platform = account_detail.platform;
+            let account_id = account_detail.account_id.clone();
+
+            tracing::info!("[Retry] Retrying publish for account: {}, platform: {:?}", account_id, platform);
+
+            // Build publish request with progress info
+            let request = PublishRequest {
+                account_id: account_id.clone(),
+                video_path: video_path.clone().into(),
+                cover_path: cover_path.clone().map(|p| p.into()),
+                title: title.clone(),
+                description: description.clone(),
+                hashtags: hashtags.clone(),
+                visibility_type: 0,
+                download_allowed: 0,
+                timeout: 0,
+                record_id: None,
+                send_time: None,
+                music_info: None,
+                poi_id: None,
+                poi_name: None,
+                anchor: None,
+                extra_info: None,
+                platform_data: None,
+                progress_info: Some((task_id.clone(), detail_id.clone(), account_id.clone(), app_handle_for_progress.clone())),
+            };
+
+            // Publish based on platform
+            let publish_result = match platform {
+                PlatformType::Douyin => {
+                    let douyin_platform = DouyinPlatform::with_storage((*db_manager).clone());
+                    douyin_platform.publish_video(request).await
+                }
+                _ => {
+                    return PublishTaskResult {
+                        success: false,
+                        detail_id,
+                        publish_url: None,
+                        error: Some(format!("Unsupported platform: {:?}", platform)),
+                    };
+                }
+            };
+
+            // Process result
+            match publish_result {
+                Ok(result) => {
+                    let publish_url = result.item_id.clone()
+                        .map(|id| format!("https://v.douyin.com/{}", id));
+
+                    let new_status = if result.success {
+                        PublicationStatus::Completed
+                    } else {
+                        PublicationStatus::Failed
+                    };
+
+                    let message = result.error_message.clone();
+                    let item_id = result.item_id.clone();
+
+                    if let Err(e) = db_manager.update_publication_account_status(
+                        &detail_id,
+                        new_status,
+                        publish_url.clone(),
+                        message.clone(),
+                        item_id.clone(),
+                    ) {
+                        tracing::error!("[Retry] Failed to update status for {}: {}", detail_id, e);
+                    }
+
+                    // 进度事件由 strategy.rs 中的 emit_progress 发送
+
+                    PublishTaskResult {
+                        success: result.success,
+                        detail_id,
+                        publish_url,
+                        error: message,
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    tracing::error!("[Retry] Publish failed for {}: {}", detail_id, error_msg);
+
+                    if let Err(e2) = db_manager.update_publication_account_status(
+                        &detail_id,
+                        PublicationStatus::Failed,
+                        None,
+                        Some(error_msg.clone()),
+                        None,
+                    ) {
+                        tracing::error!("[Retry] Failed to update status for {}: {}", detail_id, e2);
+                    }
+
+                    // 进度事件由 strategy.rs 中的 emit_progress 发送
+
+                    PublishTaskResult {
+                        success: false,
+                        detail_id,
+                        publish_url: None,
+                        error: Some(error_msg),
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all publishes to complete
+    let mut results: Vec<PublishTaskResult> = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                tracing::error!("[Retry] Task panicked: {}", e);
+                results.push(PublishTaskResult {
+                    success: false,
+                    detail_id: String::new(),
+                    publish_url: None,
+                    error: Some(format!("Retry task error: {}", e)),
+                });
+            }
+        }
+    }
+
+    // Calculate statistics
+    let success_count = results.iter().filter(|r| r.success).count();
+    let failed_count = results.len() - success_count;
+
+    // Get task with all accounts for final count
+    let task = db_manager.get_publication_task_with_accounts(task_id)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| panic!("Task not found after retry"));
+
+    // Update main task status based on all account statuses
+    if let Err(e) = db_manager.update_task_status_from_accounts(task_id) {
+        tracing::error!("[Retry] Failed to update task status: {}", e);
+    }
+
+    tracing::info!("[Retry] Retry completed: {} success, {} failed", success_count, failed_count);
+
+    Ok(PublishProgressResult {
+        total_accounts: task.accounts.len(),
+        completed_accounts: task.accounts.len(),
+        success_count,
+        failed_count,
+        results,
+    })
 }
 
 #[tauri::command]
@@ -521,6 +838,7 @@ pub fn publish_video(
         anchor: None,
         extra_info: None,
         platform_data: None,
+        progress_info: None,
     };
 
     match platform_type {
@@ -580,6 +898,7 @@ pub fn publish_saved_video(
         anchor: None,
         extra_info: None,
         platform_data: None,
+        progress_info: None,
     };
 
     // Publish based on platform

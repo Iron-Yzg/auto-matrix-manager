@@ -56,6 +56,8 @@ export interface PublicationAccountDetail {
     favorites: number
     shares: number
   }
+  message: string | null  // 发布失败原因
+  itemId: string | null   // 发布成功的视频ID
 }
 
 export interface PublicationTaskDetail {
@@ -270,7 +272,18 @@ export interface PublishTaskResult {
 }
 
 /**
- * Publish a publication task to all accounts
+ * Result of publishing with progress info
+ */
+export interface PublishProgressResult {
+  totalAccounts: number
+  completedAccounts: number
+  successCount: number
+  failedCount: number
+  results: PublishTaskResult[]
+}
+
+/**
+ * Publish a publication task to all accounts (concurrent/async)
  */
 export async function publishPublicationTask(
   taskId: string,
@@ -278,10 +291,9 @@ export async function publishPublicationTask(
   description: string,
   videoPath: string,
   hashtags: string[]
-): Promise<PublishTaskResult[]> {
+): Promise<PublishProgressResult> {
   try {
-    // 注意：使用 camelCase 参数名，Tauri 2.x 会自动转换为 Rust 的 snake_case
-    return await invoke<PublishTaskResult[]>('publish_publication_task', {
+    return await invoke<PublishProgressResult>('publish_publication_task', {
       taskId,
       title,
       description,
@@ -290,6 +302,20 @@ export async function publishPublicationTask(
     })
   } catch (error) {
     console.error('Failed to publish task:', error)
+    throw error
+  }
+}
+
+/**
+ * Retry publishing for failed or pending accounts
+ */
+export async function retryPublicationTask(
+  taskId: string
+): Promise<PublishProgressResult> {
+  try {
+    return await invoke<PublishProgressResult>('retry_publication_task', { taskId })
+  } catch (error) {
+    console.error('Failed to retry task:', error)
     throw error
   }
 }

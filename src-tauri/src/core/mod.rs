@@ -1,5 +1,8 @@
 // Core module - Platform trait and factory
 
+mod publish_progress;
+pub use publish_progress::{ProgressEmitter, get_progress_emitter};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -143,6 +146,8 @@ pub struct PublicationAccountDetail {
     pub published_at: Option<String>,
     pub publish_url: Option<String>,
     pub stats: PublicationStats,
+    pub message: Option<String>,  // 发布失败原因（记录到哪一步失败及错误信息）
+    pub item_id: Option<String>,  // 发布成功的视频ID
 }
 
 /// Publication task with all account details - 包含账号详情的任务
@@ -249,6 +254,9 @@ pub struct PublishRequest {
     /// - 快手: {"access_token": "...", ...}
     /// - 小红书: {"cookie": "...", ...}
     pub platform_data: Option<serde_json::Value>,
+    /// 进度跟踪信息（task_id, detail_id, account_id, app_handle 用于事件推送）
+    #[doc(hidden)]
+    pub progress_info: Option<(String, String, String, tauri::AppHandle)>,
 }
 
 impl PublishRequest {
@@ -302,6 +310,42 @@ pub trait Platform: Send + Sync {
 
     /// Get platform credentials from user params
     fn get_credentials_from_params(&self, params: &str) -> Result<PlatformCredentials, PlatformError>;
+}
+
+/// Publication progress status
+/// 发布进度状态
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ProgressStatus {
+    #[serde(rename = "starting")]
+    Starting,      // 开始
+    #[serde(rename = "uploading")]
+    Uploading,     // 上传中
+    #[serde(rename = "uploading_video")]
+    UploadingVideo, // 上传视频中
+    #[serde(rename = "getting_ticket")]
+    GettingTicket, // 获取凭证中
+    #[serde(rename = "building_data")]
+    BuildingData,  // 构建数据中
+    #[serde(rename = "publishing")]
+    Publishing,    // 发布中
+    #[serde(rename = "completed")]
+    Completed,     // 完成
+    #[serde(rename = "failed")]
+    Failed,        // 失败
+}
+
+/// Publication progress event
+/// 发布进度事件（用于窗口间通信）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishProgressEvent {
+    pub task_id: String,
+    pub detail_id: String,
+    pub account_id: String,
+    pub platform: String,
+    pub status: ProgressStatus,
+    pub message: String,
+    pub progress: i32,  // 0-100
+    pub timestamp: i64,
 }
 
 impl UserAccount {

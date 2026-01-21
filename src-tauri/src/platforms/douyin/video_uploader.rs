@@ -65,7 +65,7 @@ struct PartInfo {
     /// 分片编号
     part_number: i32,
     /// CRC32校验值
-    crc32: String,
+    crc32: u32,
 }
 
 /// 视频上传器
@@ -433,7 +433,13 @@ impl VideoUploader {
     /// 上传大文件（>5MB），分片上传
     async fn upload_big_content(&self, apply_result: &UploadApplyResult, video_path: &str, file_size: u64) -> Result<(), String> {
         let part_size = VIDEO_MAX_SIZE;
-        let total_parts = (file_size + part_size - 1) / part_size;
+
+        // 计算分片数量（与 Python 一致）
+        let last_chunk_size = file_size % part_size;
+        let mut total_parts = (file_size + part_size - 1) / part_size;
+        if last_chunk_size > 0 {
+            total_parts -= 1;
+        }
 
         tracing::info!("[UploadBig] ====== 开始分片上传 ======");
         tracing::info!("[UploadBig] 文件大小: {}MB, 分片大小: {}MB, 分片数: {}",
@@ -442,7 +448,6 @@ impl VideoUploader {
         // 初始化上传
         tracing::info!("[UploadBig] 步骤1: 初始化分片上传");
         let init_response = self.init_multi_part(apply_result).await?;
-        // 注意：Java 返回的是 {data: {uploadid: "..."}}，不是直接 {UploadId: "..."}
         let upload_id = init_response.get("data")
             .and_then(|v| v.get("uploadid"))
             .and_then(|v| v.as_str())
@@ -458,7 +463,9 @@ impl VideoUploader {
         tracing::info!("[UploadBig] 步骤2: 逐个上传分片");
         for i in 0..total_parts {
             let part_number = i as i32 + 1;
-            let offset = i * part_size;
+            let offset = (i as u64) * part_size;
+
+            // 计算分片大小（与 Python 一致）
             let current_part_size = std::cmp::min(part_size, file_size - offset);
 
             tracing::info!("[UploadBig] 上传分片 {}/{}, offset: {}, size: {}",
@@ -474,14 +481,17 @@ impl VideoUploader {
             file.read_exact(&mut buffer)
                 .map_err(|e| format!("读取分片失败: {}", e))?;
 
-            // 计算分片数据的CRC32校验值
+            // 计算分片数据的CRC32校验值（与 Python 一致，使用 zlib.crc32）
             let part_crc32 = crc32fast::hash(&buffer);
 
-            // 上传分片（与 Java 一致）
-            let part_url = format!("{}?phase=transfer&part_number={}&part_offset={}&uploadid={}",
-                apply_result.upload_url, part_number, offset, upload_id);
-
-            let response = self.client.put(&part_url)
+            // 上传分片（与 Python 一致，使用 POST + query params）
+            let response = self.client.post(&apply_result.upload_url)
+                .query(&[
+                    ("phase", "transfer"),
+                    ("part_number", &part_number.to_string()),
+                    ("part_offset", &offset.to_string()),
+                    ("uploadid", &upload_id),
+                ])
                 .header("Authorization", &apply_result.upload_auth)
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", current_part_size)
@@ -499,7 +509,7 @@ impl VideoUploader {
             if response.status() == StatusCode::OK || response.status() == StatusCode::CREATED {
                 uploaded_parts.push(PartInfo {
                     part_number,
-                    crc32: format!("{:x}", part_crc32),
+                    crc32: part_crc32,
                 });
                 tracing::debug!("分片 {} 上传成功", part_number);
             } else {
@@ -528,12 +538,8 @@ impl VideoUploader {
         // 使用 query 参数，与 Java 一致
         let init_url = format!("{}?uploadmode=part&phase=init", apply_result.upload_url);
 
-        // 构建请求头（与 Java 一致）
-        let body = serde_json::json!({
-            "auth": apply_result.upload_auth,
-            "session_key": apply_result.session_key,
-            "callback_url": ""
-        });
+        // Java 使用空 body
+        let empty_body: Vec<u8> = vec![];
 
         let response = self.client.post(&init_url)
             .header("Authorization", &apply_result.upload_auth)
@@ -543,8 +549,7 @@ impl VideoUploader {
             .header("X-Logical-Part-Mode", "logical_part")
             .header("X-Storage-Mode", "gateway")
             .header("X-Storage-U", &self.third_id)
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&body).unwrap_or_default())
+            .body(empty_body)
             .send()
             .await
             .map_err(|e| format!("初始化分片上传失败: {}", e))?;
@@ -583,8 +588,8 @@ impl VideoUploader {
         let part_info_str: String = sorted_parts.iter()
             .enumerate()
             .map(|(i, p)| {
-                if i > 0 { format!(",{}:{}", p.part_number, p.crc32) }
-                else { format!("{}:{}", p.part_number, p.crc32) }
+                if i > 0 { format!(",{}:{:08x}", p.part_number, p.crc32) }
+                else { format!("{}:{:08x}", p.part_number, p.crc32) }
             })
             .collect();
 
