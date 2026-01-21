@@ -55,7 +55,8 @@ export function useBrowserAuth() {
   }
 
   // Start authentication flow
-  const startAuth = async (platform: string) => {
+  // 如果传入了 accountId，则会更新现有账号而不是创建新账号
+  const startAuth = async (platform: string, accountId?: string) => {
     currentPlatform.value = platform
     isAuthenticating.value = true
     state.value.error = null
@@ -63,7 +64,7 @@ export function useBrowserAuth() {
     state.value.message = '正在启动浏览器...'
 
     try {
-      const result = await startBrowserAuth(platform)
+      const result = await startBrowserAuth(platform, accountId)
       state.value.step = getAuthStep(result.step)
       state.value.message = result.message
       state.value.currentUrl = result.currentUrl || ''

@@ -8,12 +8,14 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "cd src-tauri && cargo tauri dev",
-    "tauri:build": "cd src-tauri && cargo tauri build",
-    "tauri:bundle": "cd src-tauri && cargo tauri bundle",
-    "rust:check": "cd src-tauri && cargo check",
+    "dev:full": "pnpm rust:dev",
+    "rust:dev": "cd src-tauri && RUST_LOG=debug pnpm exec cargo tauri dev",
     "rust:build": "cd src-tauri && cargo build",
-    "rust:clippy": "cd src-tauri && cargo clippy"
+    "rust:check": "cd src-tauri && cargo check",
+    "rust:clippy": "cd src-tauri && cargo clippy",
+    "rust:release": "cd src-tauri && cargo build --release",
+    "tauri:build": "cd src-tauri && cargo tauri build",
+    "tauri:bundle": "cd src-tauri && cargo tauri bundle"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

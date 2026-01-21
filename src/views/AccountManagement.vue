@@ -75,7 +75,8 @@ const getStatusConfig = (status: 'active' | 'expired' | 'pending') => {
 const handleReauthorize = async (account: typeof accounts.value[0]) => {
   console.log('Reauthorize account:', account.id)
   currentPlatform.value = account.platform as Platform
-  await startAuth(account.platform)
+  // 传递需要更新的账号ID，这样会更新现有账号而不是创建新账号
+  await startAuth(account.platform, account.id)
 }
 
 // Handle delete

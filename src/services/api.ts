@@ -430,11 +430,15 @@ export interface BrowserAuthStatus {
 /**
  * Start browser authentication flow for a platform
  * This launches a headless browser and navigates to the platform's login page
+ * If accountId is provided, it will update the existing account instead of creating a new one
  */
-export async function startBrowserAuth(platform: string): Promise<BrowserAuthStatus> {
-  console.log('[API] Starting browser auth for platform:', platform)
+export async function startBrowserAuth(platform: string, accountId?: string): Promise<BrowserAuthStatus> {
+  console.log('[API] Starting browser auth for platform:', platform, 'accountId:', accountId)
   try {
-    const result = await invoke<BrowserAuthStatus>('start_browser_auth', { platform })
+    const result = await invoke<BrowserAuthStatus>('start_browser_auth', {
+      platform,
+      accountId: accountId || null
+    })
     console.log('[API] Browser auth started successfully:', result)
     return result
   } catch (error: any) {

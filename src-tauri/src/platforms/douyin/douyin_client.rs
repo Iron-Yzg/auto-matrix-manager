@@ -165,6 +165,7 @@ impl DouyinClient {
 
         // 设置extraHeaders
         let mut referer = BASE_URL.to_string();
+
         if let Some(headers) = extra_headers {
             for (key, value) in headers {
                 if key.to_lowercase() == "referer" {
@@ -174,19 +175,47 @@ impl DouyinClient {
                 }
             }
         }
-        request = request.header("Referer", referer);
+        request = request.header("Referer", &referer);
 
         // 设置JSON body
-        if let Some(data) = json_data {
-            let json_body = serde_json::to_string(&data).unwrap_or_default();
-            request = request.body(json_body);
-        }
+        let json_body = if let Some(data) = json_data {
+            serde_json::to_string(&data).unwrap_or_default()
+        } else {
+            String::new()
+        };
 
+        // 打印完整请求信息
+        tracing::info!("========== POST请求开始 ==========");
+        tracing::info!("URL: {}", url);
+        
+        if !json_body.is_empty() {
+            tracing::info!("Body: {}", &json_body);
+        }
+        tracing::info!("==================================");
+
+        request = request.body(json_body);
+
+        // 发送请求
         let response = request.send().await;
 
         match response {
             Ok(res) => {
+                let status = res.status();
+                let headers = res.headers().clone();
                 let text = res.text().await.unwrap_or_default();
+
+                // 打印完整响应信息
+                tracing::info!("========== POST响应开始 ==========");
+                tracing::info!("状态: {}", status);
+                tracing::info!("响应头:");
+                for (k, v) in headers.iter() {
+                    if let Ok(val) = v.to_str() {
+                        tracing::info!("  {}: {}", k, val);
+                    }
+                }
+                tracing::info!("响应体: {}", &text[..text.len().min(3000)]);
+                tracing::info!("==================================");
+
                 serde_json::from_str(&text).unwrap_or(Value::Null)
             }
             Err(e) => {
@@ -600,19 +629,6 @@ impl DouyinClient {
         );
 
         // ========== 打印发布API请求信息 ==========
-        tracing::info!("[PublishAPI] ====== 发布API请求信息 ======");
-
-        // 构建完整URL
-        let query_parts: Vec<String> = params.iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect();
-        let full_url = format!("{}/web/api/media/aweme/create_v2/?{}",
-            BASE_URL, query_parts.join("&"));
-        tracing::info!("[PublishAPI] URL: {}", full_url);
-
-        // 打印请求体
-        let body_str = serde_json::to_string(&publish_data).unwrap_or_default();
-        tracing::info!("[PublishAPI] Body : {}", &body_str);
 
         let response = self.request_post(
             "/web/api/media/aweme/create_v2/",

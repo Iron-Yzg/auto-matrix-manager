@@ -94,6 +94,8 @@ impl Default for BrowserAuthResult {
 pub struct BrowserAutomator {
     browser: Option<GenericBrowser>,
     result: BrowserAuthResult,
+    /// 重新授权时需要更新的账号ID
+    pub account_id: Option<String>,
 }
 
 impl BrowserAutomator {
@@ -101,11 +103,16 @@ impl BrowserAutomator {
         Self {
             browser: None,
             result: BrowserAuthResult::default(),
+            account_id: None,
         }
     }
 
     /// 启动通用授权流程
-    pub async fn start_authorize(&mut self, db_manager: &Arc<DatabaseManager>, platform_id: &str) -> Result<(), String> {
+    /// 如果传入了 account_id，则在授权完成后会更新该账号而不是创建新账号
+    pub async fn start_authorize(&mut self, db_manager: &Arc<DatabaseManager>, platform_id: &str, account_id: Option<&str>) -> Result<(), String> {
+        // 保存需要更新的账号ID
+        self.account_id = account_id.map(|s| s.to_string());
+
         let mut browser = GenericBrowser::new();
         browser.set_db_manager(db_manager.clone());
         let result = browser.start_authorize(platform_id).await?;

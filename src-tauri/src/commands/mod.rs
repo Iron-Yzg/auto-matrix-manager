@@ -617,14 +617,15 @@ pub struct BrowserAuthStatusResult {
 }
 
 /// 启动浏览器授权流程
+/// 如果传入了 account_id，则会更新现有账号而不是创建新账号
 #[tauri::command]
-pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppState>, platform: &str, _chrome_path: Option<&str>) -> Result<BrowserAuthStatusResult, String> {
-    eprintln!("[Command] start_browser_auth called for platform: {}", platform);
+pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppState>, platform: &str, account_id: Option<&str>, _chrome_path: Option<&str>) -> Result<BrowserAuthStatusResult, String> {
+    eprintln!("[Command] start_browser_auth called for platform: {}, account_id: {:?}", platform, account_id);
 
     let mut automator = state.browser_automator.lock().await;
 
     // 使用通用规则引擎启动授权
-    automator.start_authorize(&state.db_manager, platform)
+    automator.start_authorize(&state.db_manager, platform, account_id)
         .await
         .map_err(|e| format!("启动浏览器失败: {}", e))?;
 
@@ -639,7 +640,7 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
     if matches!(result.step, BrowserAuthStep::Completed) && !result.cookie.is_empty() {
         eprintln!("[Command] Authorization completed in initialization, saving to database...");
 
-        match save_browser_credentials(&_app, &result, platform) {
+        match save_browser_credentials(&_app, &result, platform, account_id) {
             Ok(account) => {
                 eprintln!("[Command] Account saved successfully: {}", account.nickname);
                 return Ok(BrowserAuthStatusResult {
@@ -711,8 +712,11 @@ pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, A
         eprintln!("[Command] Authorization completed, saving to database...");
         eprintln!("[Command] nickname: '{}'", result.nickname);
         eprintln!("[Command] cookie.len(): {}", result.cookie.len());
+        eprintln!("[Command] account_id to update: {:?}", automator.account_id);
 
-        match save_browser_credentials(&app, &result, "douyin") {
+        // 从automator获取account_id
+        let account_id = automator.account_id.as_deref();
+        match save_browser_credentials(&app, &result, "douyin", account_id) {
             Ok(account) => {
                 eprintln!("[Command] Account saved successfully: id={}, nickname={}", account.id, account.nickname);
                 // 返回完成的账号信息
@@ -763,8 +767,10 @@ pub async fn cancel_browser_auth(state: tauri::State<'_, AppState>) -> Result<()
 }
 
 /// 保存从浏览器提取的凭证到数据库
-fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str) -> Result<UserAccount, String> {
+/// 如果传入了 account_id，则更新现有账号而不是创建新账号
+fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str, account_id: Option<&str>) -> Result<UserAccount, String> {
     eprintln!("[Save] save_browser_credentials called");
+    eprintln!("[Save] account_id to update: {:?}", account_id);
     eprintln!("[Save] nickname: '{}'", result.nickname);
     eprintln!("[Save] avatar_url: '{}'", result.avatar_url);
     eprintln!("[Save] third_id: '{}'", result.third_id);
@@ -803,8 +809,12 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
         "third_param": serde_json::Value::Object(third_param_obj)
     });
 
+    // 使用传入的account_id或生成新的UUID
+    let account_id = account_id.map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     let account = UserAccount {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: account_id,
         username: nickname.clone(),
         nickname,
         avatar_url,
