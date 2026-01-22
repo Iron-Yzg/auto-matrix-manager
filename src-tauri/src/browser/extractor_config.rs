@@ -4,6 +4,55 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 匹配操作符
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MatchOperator {
+    /// 等于
+    Eq,
+    /// 不等于
+    Neq,
+    /// 大于
+    Gt,
+    /// 小于
+    Lt,
+    /// 大于等于
+    Gte,
+    /// 小于等于
+    Lte,
+    /// 包含
+    Contains,
+    /// 不包含
+    NotContains,
+    /// 开头是
+    StartsWith,
+    /// 结尾是
+    EndsWith,
+}
+
+impl Default for MatchOperator {
+    fn default() -> Self {
+        MatchOperator::Eq
+    }
+}
+
+impl MatchOperator {
+    /// 执行匹配
+    pub fn match_value(&self, actual: &str, expected: &str) -> bool {
+        match self {
+            MatchOperator::Eq => actual == expected,
+            MatchOperator::Neq => actual != expected,
+            MatchOperator::Gt => actual.parse::<f64>().map(|a| a > expected.parse().unwrap_or(0.0)).unwrap_or(false),
+            MatchOperator::Lt => actual.parse::<f64>().map(|a| a < expected.parse().unwrap_or(0.0)).unwrap_or(false),
+            MatchOperator::Gte => actual.parse::<f64>().map(|a| a >= expected.parse().unwrap_or(0.0)).unwrap_or(false),
+            MatchOperator::Lte => actual.parse::<f64>().map(|a| a <= expected.parse().unwrap_or(0.0)).unwrap_or(false),
+            MatchOperator::Contains => actual.contains(expected),
+            MatchOperator::NotContains => !actual.contains(expected),
+            MatchOperator::StartsWith => actual.starts_with(expected),
+            MatchOperator::EndsWith => actual.ends_with(expected),
+        }
+    }
+}
+
 /// 平台数据提取配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformExtractorConfig {
@@ -13,8 +62,16 @@ pub struct PlatformExtractorConfig {
     pub platform_name: String,
     /// 登录页 URL
     pub login_url: String,
-    /// 登录成功页 URL 模式（支持 glob 格式）
+    /// 登录成功检测模式
+    pub login_success_mode: String, // "url_match" 或 "api_match"
+    /// 登录成功页 URL 模式（支持 glob 格式）- 当 login_success_mode 为 url_match 时使用
     pub login_success_pattern: String,
+    /// API 响应匹配规则 - 当 login_success_mode 为 api_match 时使用
+    pub login_success_api_rule: Option<String>,
+    /// API 响应匹配操作符 - 当 login_success_mode 为 api_match 时使用
+    pub login_success_api_operator: Option<String>,
+    /// API 响应匹配值 - 当 login_success_mode 为 api_match 时使用
+    pub login_success_api_value: Option<String>,
     /// 登录成功后跳转页（可选）
     pub redirect_url: Option<String>,
     /// 提取规则配置
@@ -56,7 +113,11 @@ impl Default for PlatformExtractorConfig {
             platform_id: "douyin".to_string(),
             platform_name: "抖音".to_string(),
             login_url: "https://creator.douyin.com/".to_string(),
+            login_success_mode: "url_match".to_string(),
             login_success_pattern: "**/creator-micro/**".to_string(),
+            login_success_api_rule: None,
+            login_success_api_operator: None,
+            login_success_api_value: None,
             redirect_url: None,
             extract_rules: ExtractRules::default(),
             created_at: chrono::Local::now().to_string(),

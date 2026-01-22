@@ -36,7 +36,7 @@ const GENERIC_LOGIN_TIP = `
 `;
 
 // 日志控制
-const ENABLE_DEBUG_LOG = process.env.DEBUG === '0';
+const ENABLE_DEBUG_LOG = process.env.DEBUG === '1';
 
 function log(...args) {
     if (ENABLE_DEBUG_LOG) console.error('[DEBUG]', ...args);

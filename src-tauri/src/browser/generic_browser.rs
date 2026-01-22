@@ -102,7 +102,12 @@ impl GenericBrowser {
                     "platform_id": config.platform_id,
                     "platform_name": config.platform_name,
                     "login_url": config.login_url,
+                    "login_success_mode": config.login_success_mode,
                     "login_success_pattern": config.login_success_pattern,
+                    "login_success_api_rule": config.login_success_api_rule,
+                    "login_success_api_operator": config.login_success_api_operator,
+                    "login_success_api_value": config.login_success_api_value,
+                    "redirect_url": config.redirect_url,
                     "extract_rules": config.extract_rules
                 });
                 Ok(config_obj.to_string())

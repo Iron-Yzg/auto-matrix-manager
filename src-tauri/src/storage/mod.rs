@@ -25,7 +25,11 @@ pub struct ExtractorConfig {
     pub platform_id: String,
     pub platform_name: String,
     pub login_url: String,
+    pub login_success_mode: String,  // 登录成功检测模式: url_match / api_match
     pub login_success_pattern: String,
+    pub login_success_api_rule: Option<String>,  // API 匹配规则
+    pub login_success_api_operator: Option<String>,  // API 匹配操作符
+    pub login_success_api_value: Option<String>,  // API 匹配值
     pub redirect_url: Option<String>,
     pub extract_rules: serde_json::Value,
     pub is_default: bool,
@@ -127,7 +131,11 @@ impl DatabaseManager {
                 platform_id TEXT NOT NULL UNIQUE,
                 platform_name TEXT NOT NULL,
                 login_url TEXT NOT NULL,
+                login_success_mode TEXT DEFAULT 'url_match',
                 login_success_pattern TEXT NOT NULL,
+                login_success_api_rule TEXT,
+                login_success_api_operator TEXT,
+                login_success_api_value TEXT,
                 redirect_url TEXT,
                 extract_rules TEXT NOT NULL,
                 is_default INTEGER DEFAULT 0,
@@ -135,6 +143,9 @@ impl DatabaseManager {
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         "#, [])?;
+
+        // Run migrations for existing tables
+        self.run_migrations(conn)?;
 
         // Initialize default configurations for supported platforms
         Self::initialize_default_configs(conn)?;
@@ -821,6 +832,30 @@ impl DatabaseManager {
     // 平台提取引擎配置操作
     // ============================================================================
 
+    /// Run database migrations for schema updates
+    /// 运行数据库迁移以更新架构
+    fn run_migrations(&self, conn: &Connection) -> Result<()> {
+        // Migration: Add login_success_mode and related columns to extractor_configs
+        // Check if login_success_mode column exists
+        let has_login_success_mode: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('extractor_configs') WHERE name = 'login_success_mode'",
+            [],
+            |row| row.get(0)
+        ).unwrap_or(0);
+
+        if has_login_success_mode == 0 {
+            tracing::info!("[Database] Running migration: adding login_success_mode columns to extractor_configs");
+            // Add new columns to extractor_configs table
+            conn.execute("ALTER TABLE extractor_configs ADD COLUMN login_success_mode TEXT DEFAULT 'url_match'", [])?;
+            conn.execute("ALTER TABLE extractor_configs ADD COLUMN login_success_api_rule TEXT", [])?;
+            conn.execute("ALTER TABLE extractor_configs ADD COLUMN login_success_api_operator TEXT", [])?;
+            conn.execute("ALTER TABLE extractor_configs ADD COLUMN login_success_api_value TEXT", [])?;
+            tracing::info!("[Database] Migration completed: added new columns to extractor_configs");
+        }
+
+        Ok(())
+    }
+
     /// Initialize default configurations for supported platforms
     /// 初始化支持的平台的默认配置
     fn initialize_default_configs(conn: &Connection) -> Result<()> {
@@ -848,30 +883,38 @@ impl DatabaseManager {
             }
         });
 
-        let configs = vec![
+        let configs: Vec<(&str, &str, &str, &str, &str, Option<&str>, Option<&str>, Option<&str>, Option<&str>, &serde_json::Value)> = vec![
             (
                 "douyin",
                 "抖音",
                 "https://creator.douyin.com/",
+                "url_match",
                 r#"**/creator-micro/**"#,
+                None, None, None,
                 Some("https://creator.douyin.com/creator-micro/content/post"),
-                douyin_rules,
+                &douyin_rules,
             ),
             // Add more platform defaults as needed
         ];
 
-        for (platform_id, platform_name, login_url, pattern, redirect_url, rules) in configs {
+        for (platform_id, platform_name, login_url, login_mode, pattern, api_rule, api_op, api_value, redirect_url, rules) in configs {
             conn.execute(
                 r#"INSERT OR IGNORE INTO extractor_configs
-                    (id, platform_id, platform_name, login_url, login_success_pattern, redirect_url, extract_rules, is_default)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)"#,
+                    (id, platform_id, platform_name, login_url, login_success_mode, login_success_pattern,
+                     login_success_api_rule, login_success_api_operator, login_success_api_value,
+                     redirect_url, extract_rules, is_default)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)"#,
                 &[
                     &format!("config_{}", platform_id),
                     platform_id,
                     platform_name,
                     login_url,
+                    login_mode,
                     pattern,
-                    redirect_url.unwrap_or_default(),
+                    api_rule.unwrap_or(""),
+                    api_op.unwrap_or(""),
+                    api_value.unwrap_or(""),
+                    redirect_url.unwrap_or(""),
                     &rules.to_string(),
                 ],
             )?;
@@ -887,15 +930,20 @@ impl DatabaseManager {
 
         conn.execute(r#"
             INSERT OR REPLACE INTO extractor_configs (
-                id, platform_id, platform_name, login_url, login_success_pattern,
+                id, platform_id, platform_name, login_url, login_success_mode, login_success_pattern,
+                login_success_api_rule, login_success_api_operator, login_success_api_value,
                 redirect_url, extract_rules, is_default, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         "#, &[
             &config.id,
             &config.platform_id,
             &config.platform_name,
             &config.login_url,
+            &config.login_success_mode,
             &config.login_success_pattern,
+            &config.login_success_api_rule.as_ref().unwrap_or(&String::new()),
+            &config.login_success_api_operator.as_ref().unwrap_or(&String::new()),
+            &config.login_success_api_value.as_ref().unwrap_or(&String::new()),
             &config.redirect_url.as_ref().unwrap_or(&String::new()),
             &config.extract_rules.to_string(),
             &if config.is_default { "1".to_string() } else { "0".to_string() },
@@ -913,16 +961,20 @@ impl DatabaseManager {
 
         match stmt.query_row([platform_id], |row| {
             Ok(ExtractorConfig {
-                id: row.get(0)?,
-                platform_id: row.get(1)?,
-                platform_name: row.get(2)?,
-                login_url: row.get(3)?,
-                login_success_pattern: row.get(4)?,
-                redirect_url: Some(row.get(5)?),
-                extract_rules: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or(serde_json::json!({})),
-                is_default: row.get::<_, i32>(7)? == 1,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                id: row.get("id")?,
+                platform_id: row.get("platform_id")?,
+                platform_name: row.get("platform_name")?,
+                login_url: row.get("login_url")?,
+                login_success_mode: row.get("login_success_mode")?,
+                login_success_pattern: row.get("login_success_pattern")?,
+                login_success_api_rule: row.get("login_success_api_rule")?,
+                login_success_api_operator: row.get("login_success_api_operator")?,
+                login_success_api_value: row.get("login_success_api_value")?,
+                redirect_url: row.get("redirect_url")?,
+                extract_rules: serde_json::from_str(&row.get::<_, String>("extract_rules")?).unwrap_or(serde_json::json!({})),
+                is_default: row.get::<_, i32>("is_default")? == 1,
+                created_at: row.get("created_at")?,
+                updated_at: row.get("updated_at")?,
             })
         }) {
             Ok(config) => Ok(Some(config)),
@@ -938,20 +990,24 @@ impl DatabaseManager {
 
         let mut stmt = conn.prepare("SELECT * FROM extractor_configs ORDER BY platform_name")?;
         let configs = stmt.query_map([], |row| {
-            let rules_str: String = row.get(6)?;
+            let rules_str: String = row.get("extract_rules")?;
             let rules: serde_json::Value = serde_json::from_str(&rules_str).unwrap_or(serde_json::json!({}));
 
             Ok(ExtractorConfig {
-                id: row.get(0)?,
-                platform_id: row.get(1)?,
-                platform_name: row.get(2)?,
-                login_url: row.get(3)?,
-                login_success_pattern: row.get(4)?,
-                redirect_url: Some(row.get(5)?),
+                id: row.get("id")?,
+                platform_id: row.get("platform_id")?,
+                platform_name: row.get("platform_name")?,
+                login_url: row.get("login_url")?,
+                login_success_mode: row.get("login_success_mode")?,
+                login_success_pattern: row.get("login_success_pattern")?,
+                login_success_api_rule: row.get("login_success_api_rule")?,
+                login_success_api_operator: row.get("login_success_api_operator")?,
+                login_success_api_value: row.get("login_success_api_value")?,
+                redirect_url: row.get("redirect_url")?,
                 extract_rules: rules,
-                is_default: row.get::<_, i32>(7)? == 1,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                is_default: row.get::<_, i32>("is_default")? == 1,
+                created_at: row.get("created_at")?,
+                updated_at: row.get("updated_at")?,
             })
         })?.filter_map(|r| r.ok()).collect();
 

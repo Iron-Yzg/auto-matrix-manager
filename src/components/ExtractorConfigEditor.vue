@@ -12,7 +12,11 @@ interface ExtractorConfig {
   platform_id: string
   platform_name: string
   login_url: string
+  login_success_mode: string  // 新增：登录成功检测模式
   login_success_pattern: string
+  login_success_api_rule: string | null  // 新增：API匹配规则
+  login_success_api_operator: string | null  // 新增：API匹配操作符
+  login_success_api_value: string | null  // 新增：API匹配值
   redirect_url: string | null
   extract_rules: {
     user_info: Record<string, string>
@@ -26,6 +30,26 @@ interface ExtractorConfig {
   }
   is_default: boolean
 }
+
+// 登录成功检测模式选项
+const loginSuccessModes = [
+  { value: 'url_match', label: 'URL 匹配', desc: '通过检测 URL 变化判断登录成功' },
+  { value: 'api_match', label: 'API 响应匹配', desc: '通过检测 API 响应内容判断登录成功' },
+]
+
+// API 匹配操作符选项
+const matchOperators = [
+  { value: 'Eq', label: '等于' },
+  { value: 'Neq', label: '不等于' },
+  { value: 'Contains', label: '包含' },
+  { value: 'NotContains', label: '不包含' },
+  { value: 'StartsWith', label: '开头是' },
+  { value: 'EndsWith', label: '结尾是' },
+  { value: 'Gt', label: '大于' },
+  { value: 'Lt', label: '小于' },
+  { value: 'Gte', label: '大于等于' },
+  { value: 'Lte', label: '小于等于' },
+]
 
 const props = defineProps<{
   platformId: string
@@ -45,7 +69,11 @@ const config = ref<ExtractorConfig>({
   platform_id: props.platformId,
   platform_name: props.platformName,
   login_url: '',
+  login_success_mode: 'url_match',  // 默认 URL 匹配模式
   login_success_pattern: '',
+  login_success_api_rule: null,
+  login_success_api_operator: 'Eq',
+  login_success_api_value: null,
   redirect_url: null,
   extract_rules: {
     user_info: {},
@@ -86,7 +114,20 @@ onMounted(async () => {
     })
 
     if (result) {
-      config.value = result as unknown as ExtractorConfig
+      // 直接赋值基本字段
+      config.value.id = String(result.id || '')
+      config.value.platform_id = String(result.platform_id || props.platformId)
+      config.value.platform_name = String(result.platform_name || props.platformName)
+      config.value.login_url = String(result.login_url || '')
+      // 处理 login_success_mode，确保有默认值
+      config.value.login_success_mode = String(result.login_success_mode || 'url_match')
+      config.value.login_success_pattern = String(result.login_success_pattern || '')
+      // 处理 API 匹配相关字段
+      config.value.login_success_api_rule = result.login_success_api_rule ? String(result.login_success_api_rule) : null
+      config.value.login_success_api_operator = result.login_success_api_operator ? String(result.login_success_api_operator) : 'Eq'
+      config.value.login_success_api_value = result.login_success_api_value ? String(result.login_success_api_value) : null
+      config.value.redirect_url = result.redirect_url ? String(result.redirect_url) : null
+      config.value.is_default = Boolean(result.is_default)
 
       // 解析规则
       const rules = result.extract_rules as ExtractorConfig['extract_rules']
@@ -94,7 +135,7 @@ onMounted(async () => {
       // 解析用户信息规则 - 填充到 Map
       const userInfoMap = new Map<string, string>()
       for (const field of userInfoFields) {
-        const rule = rules.user_info?.[field.key]
+        const rule = rules?.user_info?.[field.key]
         if (rule) {
           userInfoMap.set(field.key, rule)
         } else {
@@ -103,14 +144,14 @@ onMounted(async () => {
       }
       userInfoRules.value = userInfoMap
 
-      headerRules.value = Object.entries(rules.request_headers || {}).map(([field, rule]) => ({
+      headerRules.value = Object.entries(rules?.request_headers || {}).map(([field, rule]) => ({
         field,
         rule
       }))
 
-      localStorageKeys.value = [...(rules.local_storage || [])]
+      localStorageKeys.value = [...(rules?.local_storage || [])]
 
-      if (rules.cookie) {
+      if (rules?.cookie) {
         cookieSource.value = rules.cookie.source === 'from_api' ? 'api' : 'browser'
         cookieApiPath.value = rules.cookie.api_path || ''
         cookieHeaderName.value = rules.cookie.header_name || ''
@@ -185,7 +226,11 @@ const handleSave = async () => {
       platformId: config.value.platform_id,
       platformName: config.value.platform_name,
       loginUrl: config.value.login_url,
+      loginSuccessMode: config.value.login_success_mode,
       loginSuccessPattern: config.value.login_success_pattern,
+      loginSuccessApiRule: config.value.login_success_api_rule,
+      loginSuccessApiOperator: config.value.login_success_api_operator,
+      loginSuccessApiValue: config.value.login_success_api_value,
       redirectUrl: config.value.redirect_url || null,
       extractRules: JSON.stringify(extractRules)
     })
@@ -245,7 +290,33 @@ const ruleSyntaxTips = [
                   class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:bg-white"
                 />
               </div>
+
+              <!-- 登录成功检测模式 -->
               <div>
+                <label class="block text-xs font-medium text-slate-600 mb-1.5">登录成功检测模式</label>
+                <div class="grid gap-2">
+                  <label
+                    v-for="mode in loginSuccessModes"
+                    :key="mode.value"
+                    class="flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition-colors"
+                    :class="config.login_success_mode === mode.value ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-slate-300'"
+                  >
+                    <input
+                      type="radio"
+                      v-model="config.login_success_mode"
+                      :value="mode.value"
+                      class="text-indigo-600"
+                    />
+                    <div>
+                      <div class="text-sm font-medium text-slate-700">{{ mode.label }}</div>
+                      <div class="text-xs text-slate-400">{{ mode.desc }}</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <!-- URL 匹配模式 - 当选择 url_match 时显示 -->
+              <div v-if="config.login_success_mode === 'url_match'">
                 <label class="block text-xs font-medium text-slate-600 mb-1.5">登录成功 URL 模式</label>
                 <input
                   v-model="config.login_success_pattern"
@@ -255,6 +326,44 @@ const ruleSyntaxTips = [
                 />
                 <p class="text-xs text-slate-400 mt-1">支持 glob 格式，如 **/creator-micro/**</p>
               </div>
+
+              <!-- API 响应匹配模式 - 当选择 api_match 时显示 -->
+              <div v-if="config.login_success_mode === 'api_match'" class="grid gap-3 p-3 bg-slate-50 rounded-lg">
+                <div>
+                  <label class="block text-xs font-medium text-slate-600 mb-1.5">API 规则</label>
+                  <input
+                    v-model="config.login_success_api_rule"
+                    type="text"
+                    placeholder="${api:/user/info:response:body:user_id}"
+                    class="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
+                  />
+                  <p class="text-xs text-slate-400 mt-1">使用规则语法提取需要比对的字段值</p>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1.5">比对操作符</label>
+                    <select
+                      v-model="config.login_success_api_operator"
+                      class="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
+                    >
+                      <option v-for="op in matchOperators" :key="op.value" :value="op.value">
+                        {{ op.label }}
+                      </option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1.5">比对值</label>
+                    <input
+                      v-model="config.login_success_api_value"
+                      type="text"
+                      placeholder="期望的值"
+                      class="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10"
+                    />
+                  </div>
+                </div>
+                <p class="text-xs text-slate-400">当 API 响应中提取的值与比对值满足条件时，认为登录成功</p>
+              </div>
+
               <div>
                 <label class="block text-xs font-medium text-slate-600 mb-1.5">跳转页 URL（可选）</label>
                 <input
@@ -263,6 +372,7 @@ const ruleSyntaxTips = [
                   placeholder="登录成功后跳转的页面"
                   class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/10 focus:bg-white"
                 />
+                <p class="text-xs text-slate-400 mt-1">配置跳转页 URL 后，会在登录成功后跳转到该页面并重新提取数据</p>
               </div>
             </div>
           </div>
