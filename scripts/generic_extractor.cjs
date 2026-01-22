@@ -253,6 +253,7 @@ async function main() {
                 info(`login_success_api_value: ${config.login_success_api_value || '(未配置)'}`);
             }
             info(`login_success_pattern: ${config.login_success_pattern}`);
+            info(`redirect_url: ${config.redirect_url || '(未配置)'}`);
             info(`=================================`);
         } catch (e) {
             error(`解析环境变量配置失败: ${e.message}`);
@@ -416,44 +417,89 @@ async function main() {
         info('等待登录...');
 
         if (isApiMatchMode) {
-            // API 匹配模式：使用 waitForResponse 等待登录 API
+            // API 匹配模式：循环等待直到登录验证通过
             info(`[等待登录] 使用 API 匹配模式，等待检测到登录成功 API: ${loginApiPath}...`);
+            info(`[等待登录] 验证规则: ${loginApiRule} ${loginOperator} ${loginExpectedValue}`);
 
-            try {
-                const response = await page.waitForResponse(
-                    response => {
-                        const url = response.url();
-                        const status = response.status();
-                        // 检查 URL 匹配和状态码
-                        return url.includes(loginApiPath) && status >= 200 && status < 300;
-                    },
-                    { timeout: 0 } // 无限等待
-                );
-                info(`[API登录检测] 收到响应: ${response.url()} (status: ${response.status()})`);
+            let loginVerified = false;
+            let retryCount = 0;
+            let browserClosed = false;
+            const MAX_RETRIES = 100; // 最多尝试100次，避免无限循环
 
-                // 检查 content-type
-                const contentType = response.headers()['content-type'] || '';
-                if (contentType.includes('application/json')) {
-                    const body = await response.json();
-                    const bodyStr = JSON.stringify(body);
-                    info(`[API登录检测] 响应内容: ${bodyStr.substring(0, 500)}${bodyStr.length > 500 ? '...' : ''}`);
-
-                    // 使用 RuleParser 解析规则并提取值
-                    const extractedValue = evaluateRule(loginApiRule, { [response.url()]: { url: response.url(), requestHeaders: response.request().headers(), responseBody: body } }, {});
-
-                    info(`[API登录检测] 提取的值: "${extractedValue}"`);
-                    info(`[API登录检测] 比对: "${extractedValue}" ${loginOperator} "${loginExpectedValue}"`);
-
-                    if (matchValue(extractedValue, loginOperator, loginExpectedValue)) {
-                        info(`[API登录检测] ✅ 匹配成功! 检测到登录成功!`);
-                    } else {
-                        info(`[API登录检测] ❌ 匹配未通过，API 返回了响应但内容不匹配`);
-                    }
-                } else {
-                    info(`[API登录检测] 跳过: content-type 不是 JSON (${contentType})`);
+            // 使用 Promise.race 来同时等待浏览器关闭和 API 响应
+            const checkBrowserClosed = async () => {
+                try {
+                    // 尝试检查页面是否还存在
+                    await page.evaluate(() => document.readyState);
+                    return false;
+                } catch (e) {
+                    return true;
                 }
-            } catch (e) {
-                error(`[等待登录] 等待 API 响应失败: ${e.message}`);
+            };
+
+            while (!loginVerified && !browserClosed && retryCount < MAX_RETRIES) {
+                retryCount++;
+
+                try {
+                    const response = await page.waitForResponse(
+                        response => {
+                            const url = response.url();
+                            const status = response.status();
+                            // 只检查 URL 匹配和状态码，验证放在后面
+                            return url.includes(loginApiPath) && status >= 200 && status < 300;
+                        },
+                    );
+                    info(`[等待登录] 第${retryCount}次收到 API 响应: ${response.url()}`);
+
+                    // 检查 content-type
+                    const contentType = response.headers()['content-type'] || '';
+                    if (contentType.includes('application/json')) {
+                        const body = await response.json();
+                        const bodyStr = JSON.stringify(body);
+                        info(`[等待登录] 响应内容: ${bodyStr.substring(0, 300)}${bodyStr.length > 300 ? '...' : ''}`);
+
+                        // 使用规则提取值
+                        const extractedValue = evaluateRule(loginApiRule, { [response.url()]: { url: response.url(), requestHeaders: response.request().headers(), responseBody: body } }, {});
+
+                        info(`[等待登录] 提取的值: "${extractedValue}"`);
+                        info(`[等待登录] 比对: "${extractedValue}" ${loginOperator} "${loginExpectedValue}"`);
+
+                        if (matchValue(extractedValue, loginOperator, loginExpectedValue)) {
+                            info(`[等待登录] ✅ 验证通过! 检测到登录成功!`);
+                            loginVerified = true;
+                        } else {
+                            info(`[等待登录] ⚠️ 验证未通过，继续等待下一次 API 响应...`);
+                        }
+                    } else {
+                        info(`[等待登录] 跳过: content-type 不是 JSON (${contentType})`);
+                    }
+                } catch (e) {
+                    // 检查浏览器是否已关闭
+                    if (await checkBrowserClosed()) {
+                        browserClosed = true;
+                        info(`[等待登录] 检测到浏览器已关闭，停止等待`);
+                        break;
+                    }
+                    // 超时，继续循环
+                    info(`[等待登录] 第${retryCount}次等待超时，继续等待...`);
+                }
+            }
+
+            if (browserClosed) {
+                info(`[等待登录] 用户取消了操作`);
+                // 抛出错误表示取消
+                throw new Error('操作被取消');
+            } else if (!loginVerified) {
+                error(`[等待登录] 多次尝试后仍未检测到登录成功，请检查配置或网络状态`);
+                // 不抛出错误，让用户看到提取结果是空的，便于调试
+            } else {
+                info(`[等待登录] 登录成功检测完成`);
+                // 重定向页面跳转
+                if (config.redirect_url) {
+                    await page.goto(config.redirect_url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    await page.waitForURL(config.redirect_url, { timeout: 0 });
+                    info('✅ 跳转重定向页面成功 :' + config.redirect_url);
+                }
             }
         } else {
             // URL 匹配模式：等待 URL 变化

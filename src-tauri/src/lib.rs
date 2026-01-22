@@ -59,22 +59,20 @@ pub fn run() {
             // Create data directory if needed
             std::fs::create_dir_all(&data_path).ok();
 
-            eprintln!("[App] Database path: {:?}", data_path.join("matrix.db"));
-
             // 检查 Playwright 环境（非阻塞方式）
             match check_playwright_env() {
                 Ok(_) => {
-                    eprintln!("[App] Playwright 环境检查通过");
+                    tracing::info!("[App] Playwright 环境检查通过");
                 }
                 Err(e) => {
-                    eprintln!("[App] Playwright 环境检查失败: {}，正在后台安装...", e);
+                    tracing::error!("[App] Playwright 环境检查失败: {}，正在后台安装...", e);
 
                     // 在后台线程安装
                     std::thread::spawn(move || {
                         if let Err(e) = ensure_playwright_env() {
-                            eprintln!("[App] Playwright 环境安装失败: {}", e);
+                            tracing::error!("[App] Playwright 环境安装失败: {}", e);
                         } else {
-                            eprintln!("[App] Playwright 环境安装完成");
+                            tracing::info!("[App] Playwright 环境安装完成");
                         }
                     });
                 }

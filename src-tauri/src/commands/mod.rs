@@ -906,7 +906,6 @@ pub struct BrowserAuthStatusResult {
 /// 如果传入了 account_id，则会更新现有账号而不是创建新账号
 #[tauri::command]
 pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppState>, platform: &str, account_id: Option<&str>, _chrome_path: Option<&str>) -> Result<BrowserAuthStatusResult, String> {
-    eprintln!("[Command] start_browser_auth called for platform: {}, account_id: {:?}", platform, account_id);
 
     let mut automator = state.browser_automator.lock().await;
 
@@ -916,19 +915,14 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
         .map_err(|e| format!("启动浏览器失败: {}", e))?;
 
     let result = automator.get_result().clone();
-    eprintln!("[Command] start_browser_auth result: step={}, need_poll={}", result.step, result.need_poll);
 
     // 如果在初始化阶段就完成了授权，保存到数据库
-    eprintln!("[Command] Debug: result.step={:?}, cookie.len()={}", result.step, result.cookie.len());
-    eprintln!("[Command] Debug: matches step = {}, cookie empty = {}",
-        matches!(result.step, BrowserAuthStep::Completed), result.cookie.is_empty());
 
     if matches!(result.step, BrowserAuthStep::Completed) && !result.cookie.is_empty() {
-        eprintln!("[Command] Authorization completed in initialization, saving to database...");
 
         match save_browser_credentials(&_app, &result, platform, account_id) {
             Ok(account) => {
-                eprintln!("[Command] Account saved successfully: {}", account.nickname);
+                tracing::info!("[Command] Account saved successfully: {}", account.nickname);
                 return Ok(BrowserAuthStatusResult {
                     step: "Completed".to_string(),
                     message: format!("授权完成！账号: {}", account.nickname),
@@ -945,7 +939,7 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
                 });
             },
             Err(e) => {
-                eprintln!("[Command] Failed to save account: {}", e);
+                tracing::error!("[Command] Failed to save account: {}", e);
                 return Ok(BrowserAuthStatusResult {
                     step: "Completed".to_string(),
                     message: format!("授权完成但保存失败: {}", e),
@@ -983,7 +977,7 @@ pub async fn start_browser_auth(_app: AppHandle, state: tauri::State<'_, AppStat
 /// 检查浏览器授权状态并提取凭证
 #[tauri::command]
 pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<BrowserAuthStatusResult, String> {
-    eprintln!("[Command] check_browser_auth_status called");
+    
     let mut automator = state.browser_automator.lock().await;
 
     // 检查登录状态并提取凭证
@@ -995,16 +989,12 @@ pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, A
 
     // 如果已完成，保存凭证到数据库
     if !need_poll && !result.cookie.is_empty() {
-        eprintln!("[Command] Authorization completed, saving to database...");
-        eprintln!("[Command] nickname: '{}'", result.nickname);
-        eprintln!("[Command] cookie.len(): {}", result.cookie.len());
-        eprintln!("[Command] account_id to update: {:?}", automator.account_id);
 
         // 从automator获取account_id
         let account_id = automator.account_id.as_deref();
         match save_browser_credentials(&app, &result, "douyin", account_id) {
             Ok(account) => {
-                eprintln!("[Command] Account saved successfully: id={}, nickname={}", account.id, account.nickname);
+                tracing::info!("[Command] Account saved successfully: id={}, nickname={}", account.id, account.nickname);
                 // 返回完成的账号信息
                 return Ok(BrowserAuthStatusResult {
                     step: "Completed".to_string(),
@@ -1022,7 +1012,7 @@ pub async fn check_browser_auth_status(app: AppHandle, state: tauri::State<'_, A
                 });
             }
             Err(e) => {
-                eprintln!("[Command] Failed to save account: {}", e);
+                tracing::error!("[Command] Failed to save account: {}", e);
                 return Err(format!("保存凭证失败: {}", e));
             }
         }
@@ -1055,14 +1045,7 @@ pub async fn cancel_browser_auth(state: tauri::State<'_, AppState>) -> Result<()
 /// 保存从浏览器提取的凭证到数据库
 /// 如果传入了 account_id，则更新现有账号而不是创建新账号
 fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str, account_id: Option<&str>) -> Result<UserAccount, String> {
-    tracing::info!("[Save] save_browser_credentials called");
-    tracing::info!("[Save] account_id to update: {:?}", account_id);
-    tracing::info!("[Save] nickname: '{}'", result.nickname);
-    tracing::info!("[Save] avatar_url: '{}'", result.avatar_url);
-    tracing::info!("[Save] third_id: '{}'", result.third_id);
-    tracing::info!("[Save] sec_uid: '{}'", result.sec_uid);
-    tracing::info!("[Save] cookie.len(): {}", result.cookie.len());
-
+    
     // 构建 third_param - 直接使用 request_headers (JSON string)
     let third_param: serde_json::Value = serde_json::from_str(&result.request_headers)
         .unwrap_or(serde_json::json!({}));
@@ -1083,10 +1066,6 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
         format!("{}用户", get_platform_name(platform))
     };
     let avatar_url = result.avatar_url.clone();
-
-    eprintln!("[Save] third_id: {}", third_id);
-    eprintln!("[Save] nickname: {}", nickname);
-    eprintln!("[Save] avatar_url: {}", avatar_url);
 
     // 构建 params JSON
     let params = serde_json::json!({
@@ -1117,13 +1096,10 @@ fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platfor
     };
 
     // 保存到数据库
-    eprintln!("[Save] Account to save: id={}, nickname={}, avatar_url={}", account.id, account.nickname, account.avatar_url);
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    eprintln!("[Save] Database path: {:?}", data_path);
     let db_manager = DatabaseManager::new(data_path.clone());
     db_manager.save_account(&account)
         .map_err(|e| e.to_string())?;
-    eprintln!("[Save] Account saved successfully!");
 
     Ok(account)
 }
