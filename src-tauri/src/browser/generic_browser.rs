@@ -46,7 +46,7 @@ impl GenericBrowser {
         self.result.step = BrowserAuthStep::LaunchingBrowser;
         self.result.message = format!("正在启动浏览器 for {}...", platform_id);
 
-        eprintln!("[GenericBrowser] start_authorize: 开始执行");
+        tracing::info!("[GenericBrowser] start_authorize: 开始执行");
 
         // 在阻塞线程中运行 Playwright 脚本
         let db_manager = self.db_manager.clone();
@@ -65,7 +65,7 @@ impl GenericBrowser {
             Ok(handle) => handle,
             Err(_) => {
                 let err_msg = "脚本执行超时 (60秒)".to_string();
-                eprintln!("[GenericBrowser] {}", err_msg);
+                tracing::info!("[GenericBrowser] {}", err_msg);
                 self.result.step = BrowserAuthStep::Failed(err_msg.clone());
                 self.result.message = err_msg.clone();
                 self.result.error = Some(err_msg.clone());
@@ -78,12 +78,12 @@ impl GenericBrowser {
             Ok(script_result) => {
                 match script_result {
                     Ok(auth_result) => {
-                        eprintln!("[GenericBrowser] 脚本执行成功");
+                        tracing::info!("[GenericBrowser] 脚本执行成功");
                         self.result = auth_result;
                         Ok(self.result.clone())
                     }
                     Err(e) => {
-                        eprintln!("[GenericBrowser] 脚本执行错误: {}", e);
+                        tracing::info!("[GenericBrowser] 脚本执行错误: {}", e);
                         self.result.step = BrowserAuthStep::Failed(e.clone());
                         self.result.message = e.clone();
                         self.result.error = Some(e.clone());
@@ -93,7 +93,7 @@ impl GenericBrowser {
             }
             Err(e) => {
                 let err_msg = format!("任务执行失败: {}", e);
-                eprintln!("[GenericBrowser] {}", err_msg);
+                tracing::info!("[GenericBrowser] {}", err_msg);
                 self.result.step = BrowserAuthStep::Failed(err_msg.clone());
                 self.result.message = err_msg.clone();
                 self.result.error = Some(err_msg.clone());
@@ -119,11 +119,11 @@ impl GenericBrowser {
 
     /// 从数据库加载配置
     fn load_config(db_manager: &Arc<DatabaseManager>, platform_id: &str) -> Result<String, String> {
-        eprintln!("[GenericBrowser] 正在查询平台配置: {}", platform_id);
+        tracing::info!("[GenericBrowser] 正在查询平台配置: {}", platform_id);
 
         match db_manager.get_extractor_config(platform_id) {
             Ok(Some(config)) => {
-                eprintln!("[GenericBrowser] 找到配置: platform_name={}, login_url={}",
+                tracing::info!("[GenericBrowser] 找到配置: platform_name={}, login_url={}",
                     config.platform_name, config.login_url);
 
                 let config_obj = serde_json::json!({
@@ -141,11 +141,11 @@ impl GenericBrowser {
                 Ok(config_obj.to_string())
             }
             Ok(None) => {
-                eprintln!("[GenericBrowser] 未找到平台配置: {}", platform_id);
+                tracing::info!("[GenericBrowser] 未找到平台配置: {}", platform_id);
                 Err(format!("未找到平台配置: {}", platform_id))
             }
             Err(e) => {
-                eprintln!("[GenericBrowser] 读取配置失败: {}", e);
+                tracing::info!("[GenericBrowser] 读取配置失败: {}", e);
                 Err(format!("读取配置失败: {}", e))
             }
         }
@@ -153,7 +153,7 @@ impl GenericBrowser {
 
     /// 在阻塞线程中运行 Playwright 脚本
     fn run_script(db_manager: Option<Arc<DatabaseManager>>, platform_id: &str) -> Result<BrowserAuthResult, String> {
-        eprintln!("[GenericBrowser] run_script called for platform: {}", platform_id);
+        tracing::info!("[GenericBrowser] run_script called for platform: {}", platform_id);
 
         // 从数据库加载配置
         let config_json = if let Some(ref db) = db_manager {
@@ -162,18 +162,18 @@ impl GenericBrowser {
             return Err("数据库管理器未设置".to_string());
         };
 
-        eprintln!("[GenericBrowser] 配置 JSON 长度: {} bytes", config_json.len());
+        tracing::info!("[GenericBrowser] 配置 JSON 长度: {} bytes", config_json.len());
 
         // 从文件读取 Node.js 脚本
         let script = Self::read_script_file()?;
-        eprintln!("[GenericBrowser] 脚本读取成功, 长度: {} bytes", script.len());
+        tracing::info!("[GenericBrowser] 脚本读取成功, 长度: {} bytes", script.len());
 
         // 获取 Playwright 目录
         let playwright_dir = Self::get_playwright_dir();
         let browsers_dir = Self::get_browsers_dir();
 
-        eprintln!("[GenericBrowser] Playwright目录: {}", playwright_dir.display());
-        eprintln!("[GenericBrowser] 浏览器目录: {}", browsers_dir.display());
+        tracing::info!("[GenericBrowser] Playwright目录: {}", playwright_dir.display());
+        tracing::info!("[GenericBrowser] 浏览器目录: {}", browsers_dir.display());
 
         // 检查浏览器目录是否存在
         if !browsers_dir.exists() {
@@ -187,7 +187,7 @@ impl GenericBrowser {
         }
 
         // 执行脚本，通过环境变量传递配置
-        eprintln!("[GenericBrowser] 启动 Node.js 脚本...");
+        tracing::info!("[GenericBrowser] 启动 Node.js 脚本...");
 
         let mut child = std::process::Command::new("node")
             .arg(&script_path)
@@ -200,7 +200,7 @@ impl GenericBrowser {
             .spawn()
             .map_err(|e| format!("无法启动脚本: {}", e))?;
 
-        eprintln!("[GenericBrowser] Node.js 进程已启动, pid: {}", child.id());
+        tracing::info!("[GenericBrowser] Node.js 进程已启动, pid: {}", child.id());
 
         let stdout = child.stdout.take().unwrap();
 
@@ -209,7 +209,7 @@ impl GenericBrowser {
         let mut result_lines = Vec::new();
         let mut in_result = false;
 
-        eprintln!("[GenericBrowser] 开始读取输出...");
+        tracing::info!("[GenericBrowser] 开始读取输出...");
 
         // 只读取 stdout
         let mut stdout_lines = reader.lines();
@@ -220,29 +220,29 @@ impl GenericBrowser {
                         in_result = true;
                         result_lines.clear();
                     } else if line == "RESULT_JSON_END" {
-                        eprintln!("[GenericBrowser] 收到 RESULT_JSON_END");
+                        tracing::info!("[GenericBrowser] 收到 RESULT_JSON_END");
                         break;
                     } else if in_result {
                         result_lines.push(line);
                     }
                 }
                 Some(Err(e)) => {
-                    eprintln!("[GenericBrowser] 读取 stdout 错误: {}", e);
+                    tracing::info!("[GenericBrowser] 读取 stdout 错误: {}", e);
                     break;
                 }
                 None => {
-                    eprintln!("[GenericBrowser] stdout 结束");
+                    tracing::info!("[GenericBrowser] stdout 结束");
                     break;
                 }
             }
         }
 
-        eprintln!("[GenericBrowser] 等待进程结束...");
+        tracing::info!("[GenericBrowser] 等待进程结束...");
         // 等待进程结束
         let status = child.wait()
             .map_err(|e| format!("等待脚本结束失败: {}", e))?;
 
-        eprintln!("[GenericBrowser] 进程结束, status: {}", status);
+        tracing::info!("[GenericBrowser] 进程结束, status: {}", status);
 
         if !status.success() {
             return Err(format!("脚本执行失败, 退出码: {:?}", status.code()));
@@ -250,7 +250,7 @@ impl GenericBrowser {
 
         // 解析结果
         let result_json: String = result_lines.join("\n");
-        eprintln!("[GenericBrowser] 结果 JSON 长度: {} bytes", result_json.len());
+        tracing::info!("[GenericBrowser] 结果 JSON 长度: {} bytes", result_json.len());
 
         if result_json.is_empty() {
             return Err("未获取到结果".to_string());

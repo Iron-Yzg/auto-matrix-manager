@@ -1055,13 +1055,13 @@ pub async fn cancel_browser_auth(state: tauri::State<'_, AppState>) -> Result<()
 /// 保存从浏览器提取的凭证到数据库
 /// 如果传入了 account_id，则更新现有账号而不是创建新账号
 fn save_browser_credentials(app: &AppHandle, result: &BrowserAuthResult, platform: &str, account_id: Option<&str>) -> Result<UserAccount, String> {
-    eprintln!("[Save] save_browser_credentials called");
-    eprintln!("[Save] account_id to update: {:?}", account_id);
-    eprintln!("[Save] nickname: '{}'", result.nickname);
-    eprintln!("[Save] avatar_url: '{}'", result.avatar_url);
-    eprintln!("[Save] third_id: '{}'", result.third_id);
-    eprintln!("[Save] sec_uid: '{}'", result.sec_uid);
-    eprintln!("[Save] cookie.len(): {}", result.cookie.len());
+    tracing::info!("[Save] save_browser_credentials called");
+    tracing::info!("[Save] account_id to update: {:?}", account_id);
+    tracing::info!("[Save] nickname: '{}'", result.nickname);
+    tracing::info!("[Save] avatar_url: '{}'", result.avatar_url);
+    tracing::info!("[Save] third_id: '{}'", result.third_id);
+    tracing::info!("[Save] sec_uid: '{}'", result.sec_uid);
+    tracing::info!("[Save] cookie.len(): {}", result.cookie.len());
 
     // 构建 third_param - 直接使用 request_headers (JSON string)
     let third_param: serde_json::Value = serde_json::from_str(&result.request_headers)
