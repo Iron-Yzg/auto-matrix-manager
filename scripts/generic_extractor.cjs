@@ -368,7 +368,8 @@ async function main() {
             // }
         }
 
-        page.on('response', async (response) => {
+        // 保存 response 监听器的引用，以便后续移除
+        const responseHandler = async (response) => {
             const url = response.url();
             const status = response.status();
 
@@ -385,7 +386,12 @@ async function main() {
             if (matchedPath) {
                 log(`[捕获 API] ${url}`);
                 try {
-                    const body = await response.text();
+                    // 直接读取响应体，不依赖 page.evaluate
+                    const body = await response.text().catch(() => null);
+                    if (!body) {
+                        error(`[捕获 API] 响应体为空: ${url}`);
+                        return;
+                    }
                     capturedApiData[url] = {
                         requestHeaders: response.request().headers(),
                         responseBody: JSON.parse(body)
@@ -396,7 +402,9 @@ async function main() {
                     error(`解析 API 响应失败: ${e.message}`);
                 }
             }
-        });
+        };
+
+        page.on('response', responseHandler);
 
         // 导航到登录页
         info(`导航到: ${config.login_url}`);
@@ -513,12 +521,16 @@ async function main() {
         }
 
         // 移除提示
-        await page.evaluate(() => {
-            const tip = document.getElementById('amm-tip-overlay');
-            if (tip) tip.remove();
-        });
+            await page.evaluate(() => {
+                const tip = document.getElementById('amm-tip-overlay');
+                if (tip) tip.remove();
+            });
 
         // 等待页面加载
+        // 登录成功且数据捕获完成，移除 response 监听器避免导航后冲突
+        // page.off('response', responseHandler);
+        info(`[数据提取] 已移除 API 监听器，准备提取数据`);
+
         await page.waitForLoadState('networkidle');
 
         // 获取 cookies
@@ -526,14 +538,19 @@ async function main() {
         const cookieString = cookies.map(c => c.name + '=' + c.value).join('; ');
 
         // 获取 localStorage (使用已解析的 localStorageKeys)
-        const localStorageItems = await page.evaluate((keys) => {
-            const items = [];
-            for (const key of keys) {
-                const value = localStorage.getItem(key);
-                if (value) items.push({ key, value });
-            }
-            return items;
-        }, localStorageKeys);
+        // 使用 context.evaluate 代替 page.evaluate，避免页面导航导致上下文销毁
+        let localStorageItems = [];
+        if (localStorageKeys.length > 0) {
+            localStorageItems = await page.evaluate((keys) => {
+                const items = [];
+                for (const key of keys) {
+                    const value = localStorage.getItem(key);
+                    if (value) items.push({ key, value });
+                }
+                return items;
+            }, localStorageKeys);
+        }
+        
 
         // 构建 requestHeaders（用于 cookie 提取）
         const requestHeaders = capturedApiData[Object.keys(capturedApiData)[0]]?.requestHeaders || {};
