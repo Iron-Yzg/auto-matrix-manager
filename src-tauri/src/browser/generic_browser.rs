@@ -162,18 +162,12 @@ impl GenericBrowser {
             return Err("数据库管理器未设置".to_string());
         };
 
-        tracing::info!("[GenericBrowser] 配置 JSON 长度: {} bytes", config_json.len());
-
         // 从文件读取 Node.js 脚本
         let script = Self::read_script_file()?;
-        tracing::info!("[GenericBrowser] 脚本读取成功, 长度: {} bytes", script.len());
 
         // 获取 Playwright 目录
         let playwright_dir = Self::get_playwright_dir();
         let browsers_dir = Self::get_browsers_dir();
-
-        tracing::info!("[GenericBrowser] Playwright目录: {}", playwright_dir.display());
-        tracing::info!("[GenericBrowser] 浏览器目录: {}", browsers_dir.display());
 
         // 检查浏览器目录是否存在
         if !browsers_dir.exists() {

@@ -360,6 +360,11 @@ async function main() {
             info(`  API路径: ${loginApiPath}`);
             info(`  操作符: ${loginOperator}`);
             info(`  期望值: ${loginExpectedValue}`);
+
+            // const parsed = RuleParser.parse(loginApiPath);
+            // if (parsed.type === 'api') {
+            //     apiPaths.add(parsed.apiPath);
+            // }
         }
 
         page.on('response', async (response) => {
@@ -412,8 +417,7 @@ async function main() {
 
         if (isApiMatchMode) {
             // API 匹配模式：使用 waitForResponse 等待登录 API
-            info('[等待登录] 使用 API 匹配模式，等待检测到登录成功...');
-            logSync(`[TRACE] 开始等待 API: ${loginApiPath}`);
+            info(`[等待登录] 使用 API 匹配模式，等待检测到登录成功 API: ${loginApiPath}...`);
 
             try {
                 const response = await page.waitForResponse(
@@ -425,8 +429,6 @@ async function main() {
                     },
                     { timeout: 0 } // 无限等待
                 );
-
-                logSync('[TRACE] 收到登录 API 响应');
                 info(`[API登录检测] 收到响应: ${response.url()} (status: ${response.status()})`);
 
                 // 检查 content-type
@@ -444,10 +446,8 @@ async function main() {
 
                     if (matchValue(extractedValue, loginOperator, loginExpectedValue)) {
                         info(`[API登录检测] ✅ 匹配成功! 检测到登录成功!`);
-                        logSync('[TRACE] API 匹配成功');
                     } else {
                         info(`[API登录检测] ❌ 匹配未通过，API 返回了响应但内容不匹配`);
-                        logSync('[TRACE] API 响应内容不匹配');
                     }
                 } else {
                     info(`[API登录检测] 跳过: content-type 不是 JSON (${contentType})`);
