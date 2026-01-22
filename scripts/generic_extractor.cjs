@@ -44,7 +44,7 @@ function log(...args) {
 
 // info 日志始终输出，方便调试
 function info(...args) {
-    console.error('[INFO]', ...args);
+    if (ENABLE_DEBUG_LOG) console.error('[INFO]', ...args);
 }
 
 function error(...args) {
