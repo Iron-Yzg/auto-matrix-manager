@@ -15,19 +15,37 @@ const accounts = ref<Array<{
 }>>([])
 
 const loading = ref(false)
-const currentPlatform = ref<Platform>('douyin')
+const currentPlatform = ref<Platform | 'all'>('all')
+
+// Add account modal
+const showAddAccountModal = ref(false)
+const selectedPlatformForAdd = ref<Platform>('douyin')
 
 // Browser auth
 const { state, isAuthenticating, startAuth, cancelAuth } = useBrowserAuth()
 
-// Current platform info
-const currentPlatformInfo = computed(() => PLATFORMS.find(p => p.id === currentPlatform.value)!)
+// Current platform info (用于下拉框显示)
+const currentPlatformInfo = computed(() => {
+  if (currentPlatform.value === 'all') {
+    return { id: 'all', name: '全部平台', icon: '', color: '' }
+  }
+  return PLATFORMS.find(p => p.id === currentPlatform.value)!
+})
+
+// Get platform info helper
+const getPlatformInfo = (platform: Platform) => PLATFORMS.find(p => p.id === platform)!
 
 // Load accounts
 const loadAccounts = async () => {
   loading.value = true
   try {
-    const backendAccounts = await getAccounts(currentPlatform.value)
+    let backendAccounts
+    if (currentPlatform.value === 'all') {
+      // 获取所有平台的账号
+      backendAccounts = await getAccounts('all')
+    } else {
+      backendAccounts = await getAccounts(currentPlatform.value)
+    }
     accounts.value = backendAccounts.map(toFrontendAccount)
   } catch (error) {
     console.error('Failed to load accounts:', error)
@@ -54,13 +72,27 @@ const handlePlatformChange = () => {
   loadAccounts()
 }
 
-// Start adding account
-const handleAddAccount = async () => {
-  await startAuth(currentPlatform.value)
+// Open add account modal
+const openAddAccountModal = () => {
+  showAddAccountModal.value = true
+  selectedPlatformForAdd.value = 'douyin'
 }
 
-// Get platform info
-const getPlatformInfo = (platform: Platform) => PLATFORMS.find(p => p.id === platform)!
+// Close add account modal
+const closeAddAccountModal = () => {
+  showAddAccountModal.value = false
+}
+
+// Confirm add account with selected platform
+const confirmAddAccount = async () => {
+  closeAddAccountModal()
+  await startAuth(selectedPlatformForAdd.value)
+}
+
+// Start adding account (called from modal)
+const handleAddAccount = async () => {
+  openAddAccountModal()
+}
 
 // Get status config
 const getStatusConfig = (status: 'active' | 'expired' | 'pending') => {
@@ -142,10 +174,13 @@ const getStatusText = (step: AuthStep): string => {
     <!-- Header -->
     <div class="flex items-center justify-between mb-4 flex-shrink-0">
       <div class="flex items-center gap-4">
-        <!-- Platform Selector -->
+        <!-- Platform Selector (用于筛选列表) -->
         <div class="relative">
           <div class="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-xl hover:border-slate-300 transition-colors cursor-pointer">
-            <img :src="currentPlatformInfo.icon" :alt="currentPlatformInfo.name" class="w-5 h-5" />
+            <img v-if="currentPlatform !== 'all'" :src="currentPlatformInfo.icon" :alt="currentPlatformInfo.name" class="w-5 h-5" />
+            <svg v-else class="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+            </svg>
             <span class="text-sm font-medium text-slate-700">{{ currentPlatformInfo.name }}</span>
             <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -156,6 +191,7 @@ const getStatusText = (step: AuthStep): string => {
             @change="handlePlatformChange"
             class="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           >
+            <option value="all">全部平台</option>
             <option v-for="p in PLATFORMS" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
         </div>
@@ -250,6 +286,42 @@ const getStatusText = (step: AuthStep): string => {
         </div>
         <h3 class="text-sm font-medium text-slate-600 mb-1">暂无账号</h3>
         <p class="text-xs text-slate-400">点击"添加账号"按钮开始授权</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Account Platform Selection Modal -->
+  <div v-if="showAddAccountModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-xl p-6 max-w-sm mx-4 shadow-xl">
+      <h3 class="text-lg font-semibold text-slate-800 text-center mb-4">选择平台</h3>
+      <div class="space-y-2">
+        <button
+          v-for="platform in PLATFORMS"
+          :key="platform.id"
+          @click="selectedPlatformForAdd = platform.id as Platform"
+          :class="[
+            'w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200',
+            selectedPlatformForAdd === platform.id
+              ? 'bg-indigo-50 border-2 border-indigo-600'
+              : 'bg-white border-2 border-slate-200 hover:border-slate-300'
+          ]"
+        >
+          <img :src="platform.icon" :alt="platform.name" class="w-6 h-6 object-contain" />
+          <span :class="['font-medium', selectedPlatformForAdd === platform.id ? 'text-indigo-600' : 'text-slate-700']">
+            {{ platform.name }}
+          </span>
+          <svg v-if="selectedPlatformForAdd === platform.id" class="w-5 h-5 text-indigo-600 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          </svg>
+        </button>
+      </div>
+      <div class="flex gap-3 mt-6">
+        <button @click="closeAddAccountModal" class="flex-1 px-4 py-2.5 text-slate-600 font-medium bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors">
+          取消
+        </button>
+        <button @click="confirmAddAccount" class="flex-1 px-4 py-2.5 text-white font-medium bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors">
+          确定
+        </button>
       </div>
     </div>
   </div>

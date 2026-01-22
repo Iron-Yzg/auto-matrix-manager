@@ -82,6 +82,16 @@ pub fn get_accounts(
     app: AppHandle,
     platform: &str,
 ) -> Result<Vec<UserAccount>, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+
+    // 如果 platform 是 "all"，获取所有平台的账号
+    if platform == "all" {
+        return db_manager.get_all_accounts()
+            .map_err(|e| e.to_string());
+    }
+
+    // 否则按指定平台查询
     let platform_type = match platform {
         "douyin" => PlatformType::Douyin,
         "xiaohongshu" => PlatformType::Xiaohongshu,
@@ -90,8 +100,6 @@ pub fn get_accounts(
         _ => return Err(format!("Unknown platform: {}", platform)),
     };
 
-    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path);
     db_manager.get_accounts_by_platform(platform_type)
         .map_err(|e| e.to_string())
 }
