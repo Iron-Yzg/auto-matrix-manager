@@ -35,15 +35,16 @@ const GENERIC_LOGIN_TIP = `
     </div>
 `;
 
-// 日志控制
+// 日志控制 - info始终输出，debug需要DEBUG=1
 const ENABLE_DEBUG_LOG = process.env.DEBUG === '1';
 
 function log(...args) {
     if (ENABLE_DEBUG_LOG) console.error('[DEBUG]', ...args);
 }
 
+// info 日志始终输出，方便调试
 function info(...args) {
-    if (ENABLE_DEBUG_LOG) console.error('[INFO]', ...args);
+    console.error('[INFO]', ...args);
 }
 
 function error(...args) {
@@ -157,6 +158,58 @@ function evaluateRule(rule, apiData, requestHeaders) {
     }
 }
 
+// 从规则中提取 API 路径
+function extractApiPath(rule) {
+    if (rule && rule.startsWith('${api:')) {
+        const content = rule.slice(6, -1); // 去掉 ${api: 和 }
+        const colonIndex = content.indexOf(':');
+        if (colonIndex > 0) {
+            return content.substring(0, colonIndex);
+        }
+    }
+    return null;
+}
+
+// 匹配操作符执行
+function matchValue(actual, operator, expected) {
+    const actualStr = String(actual);
+    const expectedStr = String(expected);
+
+    switch (operator) {
+        case 'Eq':
+        case 'Equals':
+        case '=':
+            return actualStr === expectedStr;
+        case 'Neq':
+        case 'NotEquals':
+        case '!=':
+            return actualStr !== expectedStr;
+        case 'Contains':
+            return actualStr.includes(expectedStr);
+        case 'NotContains':
+            return !actualStr.includes(expectedStr);
+        case 'StartsWith':
+            return actualStr.startsWith(expectedStr);
+        case 'EndsWith':
+            return actualStr.endsWith(expectedStr);
+        case 'Gt':
+        case '>':
+            return parseFloat(actualStr) > parseFloat(expectedStr);
+        case 'Lt':
+        case '<':
+            return parseFloat(actualStr) < parseFloat(expectedStr);
+        case 'Gte':
+        case '>=':
+            return parseFloat(actualStr) >= parseFloat(expectedStr);
+        case 'Lte':
+        case '<=':
+            return parseFloat(actualStr) <= parseFloat(expectedStr);
+        default:
+            info(`[警告] 未知的操作符: ${operator}，使用默认值(Eq)`);
+            return actualStr === expectedStr;
+    }
+}
+
 async function main() {
     const args = process.argv.slice(2);
     let platformId;
@@ -193,8 +246,13 @@ async function main() {
             info(`platform_id: ${config.platform_id}`);
             info(`platform_name: ${config.platform_name}`);
             info(`login_url: ${config.login_url}`);
+            info(`login_success_mode: ${config.login_success_mode || 'url_match'}`);
+            if (config.login_success_mode === 'api_match') {
+                info(`login_success_api_rule: ${config.login_success_api_rule || '(未配置)'}`);
+                info(`login_success_api_operator: ${config.login_success_api_operator || 'Eq'}`);
+                info(`login_success_api_value: ${config.login_success_api_value || '(未配置)'}`);
+            }
             info(`login_success_pattern: ${config.login_success_pattern}`);
-            info(`extract_rules: ${JSON.stringify(config.extract_rules, null, 2)}`);
             info(`=================================`);
         } catch (e) {
             error(`解析环境变量配置失败: ${e.message}`);
@@ -249,29 +307,7 @@ async function main() {
         const userInfoRules = rules.user_info || {};  // 使用 snake_case
         const headerRules = rules.request_headers || {};  // 使用 snake_case
 
-        // 打印完整的提取规则配置
-        info('========== 收到的提取规则配置 ==========');
-        info('config.extract_rules:');
-        info(JSON.stringify(rules, null, 2));
-        info('');
-        info('userInfo 规则 (用于提取用户信息):');
-        for (const [key, rule] of Object.entries(userInfoRules)) {
-            info(`  ${key}: "${rule}"`);
-        }
-        info('');
-        info('requestHeaders 规则 (用于提取请求头):');
-        for (const [key, rule] of Object.entries(headerRules)) {
-            info(`  ${key}: "${rule}"`);
-        }
-        info('');
-        info('cookie 规则:');
-        info(`  ${JSON.stringify(rules.cookie || '未配置')}`);
-        info('');
-        info('localStorage 规则:');
-        const localStorageKeys = rules.local_storage || [];  // 使用 snake_case
-        info(`  ${JSON.stringify(localStorageKeys)}`);
-        info('===========================================');
-
+        const localStorageKeys = rules.local_storage || [];
         // 收集所有需要捕获的 API 路径
         const apiPaths = new Set();
         info('');
@@ -282,9 +318,9 @@ async function main() {
             const parsed = RuleParser.parse(rule);
             if (parsed.type === 'api') {
                 apiPaths.add(parsed.apiPath);
-                info(`    -> ✅ 匹配 API 路径: "${parsed.apiPath}"`);
+                // info(`    -> ✅ 匹配 API 路径: "${parsed.apiPath}"`);
             } else {
-                info(`    -> ❌ 非 API 规则 (type=${parsed.type})`);
+                // info(`    -> ❌ 非 API 规则 (type=${parsed.type})`);
             }
         }
         info('');
@@ -294,9 +330,9 @@ async function main() {
             const parsed = RuleParser.parse(rule);
             if (parsed.type === 'api') {
                 apiPaths.add(parsed.apiPath);
-                info(`    -> ✅ 匹配 API 路径: "${parsed.apiPath}"`);
+                // info(`    -> ✅ 匹配 API 路径: "${parsed.apiPath}"`);
             } else {
-                info(`    -> ❌ 非 API 规则 (type=${parsed.type})`);
+                // info(`    -> ❌ 非 API 规则 (type=${parsed.type})`);
             }
         }
         info('');
@@ -305,10 +341,64 @@ async function main() {
         info(`共 ${apiPaths.size} 个 API 路径`);
         info('');
 
+        // 登录成功状态
+        let loginSuccess = false;
+
         // 监听 API 响应
         info('========== 开始监听 API 响应 ==========');
+
+        // 处理 API 匹配模式的登录成功检测
+        const isApiMatchMode = config.login_success_mode === 'api_match';
+        const loginApiRule = config.login_success_api_rule;
+        const loginApiPath = isApiMatchMode ? extractApiPath(loginApiRule) : null;
+        const loginOperator = config.login_success_api_operator || 'Eq';
+        const loginExpectedValue = config.login_success_api_value || '';
+
+        if (isApiMatchMode) {
+            info(`[API匹配模式] 登录成功检测配置:`);
+            info(`  API规则: ${loginApiRule}`);
+            info(`  API路径: ${loginApiPath}`);
+            info(`  操作符: ${loginOperator}`);
+            info(`  期望值: ${loginExpectedValue}`);
+        }
+
         page.on('response', async (response) => {
             const url = response.url();
+            const status = response.status();
+
+            // ========== API 匹配模式的登录成功检测 ==========
+            if (isApiMatchMode && !loginSuccess && loginApiPath && url.includes(loginApiPath)) {
+                info(`[API登录检测] 收到响应: ${url} (status: ${status})`);
+
+                if (status >= 200 && status < 300) {
+                    const contentType = response.headers()['content-type'] || '';
+                    if (contentType.includes('application/json')) {
+                        try {
+                            const body = await response.json();
+                            const bodyStr = JSON.stringify(body);
+                            info(`[API登录检测] 响应内容: ${bodyStr.substring(0, 500)}${bodyStr.length > 500 ? '...' : ''}`);
+
+                            // 使用 RuleParser 解析规则并提取值
+                            const extractedValue = evaluateRule(loginApiRule, { [url]: { url, requestHeaders: response.request().headers(), responseBody: body } }, {});
+
+                            info(`[API登录检测] 提取的值: "${extractedValue}"`);
+                            info(`[API登录检测] 比对: "${extractedValue}" ${loginOperator} "${loginExpectedValue}"`);
+
+                            if (matchValue(extractedValue, loginOperator, loginExpectedValue)) {
+                                info(`[API登录检测] ✅ 匹配成功! 检测到登录成功!`);
+                                loginSuccess = true;
+                            } else {
+                                info(`[API登录检测] ❌ 匹配未通过`);
+                            }
+                        } catch (e) {
+                            error(`[API登录检测] 解析响应失败: ${e.message}`);
+                        }
+                    } else {
+                        info(`[API登录检测] 跳过: content-type 不是 JSON (${contentType})`);
+                    }
+                }
+            }
+            // =================================================
 
             // 检查是否是需要捕获的 API
             let matchedPath = null;
@@ -353,11 +443,23 @@ async function main() {
 
         // 等待登录成功
         info('等待登录...');
-        if (config.login_success_pattern) {
-            await page.waitForURL(config.login_success_pattern, { timeout: 0 });
+
+        if (isApiMatchMode) {
+            // API 匹配模式：等待 loginSuccess 变为 true
+            info('[等待登录] 使用 API 匹配模式，等待检测到登录成功...');
+            while (!loginSuccess) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            info('[等待登录] ✅ 检测到登录成功 (API 匹配)');
         } else {
-            // 默认等待 creator-micro 页面
-            await page.waitForURL('**/creator-micro/**', { timeout: 0 });
+            // URL 匹配模式：等待 URL 变化
+            if (config.login_success_pattern) {
+                await page.waitForURL(config.login_success_pattern, { timeout: 0 });
+            } else {
+                // 默认等待 creator-micro 页面
+                await page.waitForURL('**/creator-micro/**', { timeout: 0 });
+            }
+            info('✅ 登录成功 (URL 匹配)');
         }
 
         // 移除提示
@@ -365,8 +467,6 @@ async function main() {
             const tip = document.getElementById('amm-tip-overlay');
             if (tip) tip.remove();
         });
-
-        info('登录成功');
 
         // 等待页面加载
         await page.waitForLoadState('networkidle');
@@ -392,76 +492,45 @@ async function main() {
         const extractionRules = config.extract_rules || {};
         const extractedData = {};
 
-        // 打印提取前的状态
-        info('');
-        info('========== 开始提取数据 ==========');
-        info(`capturedApiData 接口数: ${Object.keys(capturedApiData).length}`);
-        info(`capturedApiData 接口列表:`);
-        for (const [url, data] of Object.entries(capturedApiData)) {
-            info(`  - ${url}`);
-        }
-        info('');
-        info('--- 提取用户信息 (userInfo) ---');
-
+        info('--- 提取用户信息 (user_info) ---');
         // 提取用户信息
         if (extractionRules.user_info) {
             for (const [key, rule] of Object.entries(extractionRules.user_info)) {
                 extractedData[key] = evaluateRule(rule, capturedApiData, requestHeaders);
-                info(`  ${key}: "${rule}"`);
-                info(`    -> 提取结果: "${extractedData[key]}"`);
-                if (extractedData[key] === '') {
-                    info(`    -> ⚠️ 结果为空! 检查 API 数据是否已捕获`);
-                }
+                // info(`  ${key}: "${rule}"`);
+                // info(`    -> 提取结果: "${extractedData[key]}"`);
+                // if (extractedData[key] === '') {
+                //     info(`    -> ⚠️ 结果为空! 检查 API 数据是否已捕获`);
+                // }
             }
-        } else {
-            info(`  ❌ 未配置 user_info 规则`);
         }
-        info('');
 
         info('--- 提取请求头 (requestHeaders) ---');
         // 提取请求头
         if (extractionRules.request_headers) {
             for (const [key, rule] of Object.entries(extractionRules.request_headers)) {
                 extractedData[key] = evaluateRule(rule, capturedApiData, requestHeaders);
-                info(`  ${key}: "${rule}"`);
-                info(`    -> 提取结果: "${extractedData[key]}"`);
+                // info(`  ${key}: "${rule}"`);
+                // info(`    -> 提取结果: "${extractedData[key]}"`);
             }
-        } else {
-            info(`  ❌ 未配置 request_headers 规则`);
         }
-        info('');
 
+
+        info('--- 提取cookie ---');
         // 处理 cookie 提取规则
-        info('--- 提取 Cookie ---');
-        info(`浏览器 cookies 数量: ${cookies.length}`);
-        info(`cookieString 长度: ${cookieString.length}`);
         let cookie = cookieString;
         if (extractionRules.cookie) {
             const cookieRule = extractionRules.cookie;
-            info(`cookie 规则: ${JSON.stringify(cookieRule)}`);
             if (cookieRule.source === 'from_api' && cookieRule.apiPath) {
                 for (const [url, data] of Object.entries(capturedApiData)) {
                     if (url.includes(cookieRule.apiPath)) {
                         const headerName = cookieRule.headerName || 'cookie';
                         cookie = data.requestHeaders[headerName] || cookieString;
-                        info(`从 API 提取 cookie: ${url}, header=${headerName}`);
-                        info(`  cookie 长度: ${cookie.length}`);
                         break;
                     }
                 }
             }
         }
-        info(`最终 cookie 长度: ${cookie.length}`);
-        info('');
-
-        // 处理 localStorage 提取
-        info('--- 提取 localStorage ---');
-        info(`localStorage 规则: ${JSON.stringify(localStorageKeys)}`);
-        info(`localStorageItems: ${JSON.stringify(localStorageItems)}`);
-        if (localStorageItems.length === 0) {
-            info(`⚠️ localStorage 提取结果为空`);
-        }
-        info('');
 
         // 打印提取结果
         info('');
@@ -483,7 +552,8 @@ async function main() {
             }
         }
         info('');
-        info(`localStorageItems: ${JSON.stringify(localStorageItems, null, 2)}`);
+        info(`localStorageItems长度: ${localStorageItems.length}`);
+        info(`localStorageItems 前100字符: ${cookie.substring(0, 100)}...`);
         info(`cookie 长度: ${cookie.length}`);
         info(`cookie 前100字符: ${cookie.substring(0, 100)}...`);
         info('===================================');
@@ -541,15 +611,6 @@ async function main() {
                 return userInfo;
             })(),
         };
-
-        // 打印结果摘要
-        info('');
-        info('========== 最终结果 ==========');
-        info(`cookie: ${result.cookie.substring(0, 50)}...`);
-        info(`local_storage: ${result.local_storage.length} 项`);
-        info(`request_headers: ${JSON.stringify(result.request_headers)}`);
-        info(`user_info: ${JSON.stringify(result.user_info)}`);
-        info('================================');
 
         if (outputFile) {
             fs.writeFileSync(outputFile, JSON.stringify(result, null, 2));
