@@ -525,13 +525,14 @@ export interface Comment {
 
 /**
  * Comment extraction result
+ * Note: Tauri returns snake_case field names, not camelCase
  */
 export interface CommentExtractResult {
   success: boolean
-  totalExtracted: number
-  totalInAweme: number
+  total_extracted: number
+  total_in_aweme: number
   comments: Comment[]
-  errorMessage: string | null
+  error_message: string | null
 }
 
 /**
@@ -539,17 +540,20 @@ export interface CommentExtractResult {
  * @param detailId - Publication account detail ID (publication_accounts table id)
  * @param awemeId - Video ID (item_id)
  * @param maxCount - Maximum number of comments to extract (default: 500)
+ * @param cursor - Pagination cursor (default: 0, start from beginning)
  */
 export async function extractComments(
   detailId: string,
   awemeId: string,
-  maxCount: number = 500
+  maxCount: number = 500,
+  cursor: number = 0
 ): Promise<CommentExtractResult> {
   try {
     return await invoke<CommentExtractResult>('extract_comments', {
       detailId,
       awemeId,
       maxCount,
+      cursor,
     })
   } catch (error) {
     console.error('Failed to extract comments:', error)
@@ -558,57 +562,24 @@ export async function extractComments(
 }
 
 /**
- * Get comments by aweme_id
- */
-export async function getCommentsByAwemeId(awemeId: string): Promise<Comment[]> {
-  try {
-    return await invoke<Comment[]>('get_comments_by_aweme_id', { awemeId })
-  } catch (error) {
-    console.error('Failed to get comments:', error)
-    throw error
-  }
-}
-
-/**
- * Get comments by account_id
- */
-export async function getCommentsByAccountId(accountId: string): Promise<Comment[]> {
-  try {
-    return await invoke<Comment[]>('get_comments_by_account_id', { accountId })
-  } catch (error) {
-    console.error('Failed to get comments:', error)
-    throw error
-  }
-}
-
-/**
  * Get comments by aweme_id with pagination
+ * @param awemeId - Video ID (item_id)
+ * @param page - Page number (1-indexed)
+ * @param pageSize - Number of items per page
  */
-export async function getCommentsByAwemeIdPaginated(
+export async function getCommentsByAwemeId(
   awemeId: string,
-  offset: number,
-  limit: number
-): Promise<Comment[]> {
+  page: number = 1,
+  pageSize: number = 50
+): Promise<{ comments: Comment[]; total: number }> {
   try {
-    return await invoke<Comment[]>('get_comments_by_aweme_id_paginated', {
+    return await invoke<{ comments: Comment[]; total: number }>('get_comments_by_aweme_id', {
       awemeId,
-      offset,
-      limit,
+      page,
+      pageSize,
     })
   } catch (error) {
-    console.error('Failed to get comments (paginated):', error)
-    throw error
-  }
-}
-
-/**
- * Get comment count by aweme_id
- */
-export async function getCommentCount(awemeId: string): Promise<number> {
-  try {
-    return await invoke<number>('get_comment_count', { awemeId })
-  } catch (error) {
-    console.error('Failed to get comment count:', error)
+    console.error('Failed to get comments:', error)
     throw error
   }
 }
@@ -621,6 +592,18 @@ export async function deleteComments(awemeId: string): Promise<boolean> {
     return await invoke<boolean>('delete_comments', { awemeId })
   } catch (error) {
     console.error('Failed to delete comments:', error)
+    throw error
+  }
+}
+
+/**
+ * Get actual comment count from database
+ */
+export async function getCommentCount(awemeId: string): Promise<number> {
+  try {
+    return await invoke<number>('get_comment_count', { awemeId })
+  } catch (error) {
+    console.error('Failed to get comment count:', error)
     throw error
   }
 }

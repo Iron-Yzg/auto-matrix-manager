@@ -2,7 +2,7 @@
 //!
 //! 提供抖音视频发布功能的相关实现
 //!
-//! # 模块结构
+//!! # 模块结构
 //!
 //! - [`account_params`] - 抖音账号参数结构体
 //! - [`utils`] - 工具函数
@@ -11,6 +11,7 @@
 //! - [`video_uploader`] - 视频上传器
 //! - [`strategy`] - 发布策略（主入口）
 //! - [`comment_extractor`] - 评论提取器
+//! - [`a_bogus`] - a_bogus签名计算
 
 use crate::core::{Platform, PlatformType, PlatformError, UserAccount, PublishRequest as CorePublishRequest, CommentExtractResult};
 use crate::platforms::traits::{PublishStrategy, CommentExtractor};
@@ -25,6 +26,7 @@ pub mod douyin_client;
 pub mod video_uploader;
 pub mod strategy;
 pub mod comment_extractor;
+pub mod a_bogus;
 
 // 导出主要类型
 pub use self::strategy::DouyinPublishStrategy;
@@ -244,13 +246,8 @@ impl CommentExtractor for DouyinPlatform {
         account_id: &str,
         aweme_id: &str,
         max_count: i64,
+        cursor: i64,
     ) -> Result<CommentExtractResult, PlatformError> {
-        tracing::info!(
-            "[Comment] 开始提取评论, account_id: {}, aweme_id: {}, max_count: {}",
-            account_id,
-            aweme_id,
-            max_count
-        );
 
         // 检查db_manager是否可用
         if self.db_manager.is_none() {
@@ -279,8 +276,8 @@ impl CommentExtractor for DouyinPlatform {
         let extractor = DouyinCommentExtractor::from_params(&account.params)
             .map_err(|e| PlatformError::InvalidCredentials(e.to_string()))?;
 
-        // 执行提取
-        let mut result = extractor.extract(aweme_id, max_count).await?;
+        // 执行提取（传入cursor用于分页）
+        let mut result = extractor.extract(aweme_id, max_count, cursor).await?;
 
         // 设置account_id
         for comment in &mut result.comments {

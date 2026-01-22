@@ -42,10 +42,11 @@ pub trait CommentExtractor: Send + Sync {
     /// * `account_id` - 账号ID（用于获取凭证）
     /// * `aweme_id` - 作品ID
     /// * `max_count` - 最大提取评论数（默认500，上限500）
+    /// * `cursor` - 分页游标（用于增量提取，从0开始）
     ///
     /// # 返回
     ///
     /// 评论提取结果
-    async fn extract_comments(&self, account_id: &str, aweme_id: &str, max_count: i64)
+    async fn extract_comments(&self, account_id: &str, aweme_id: &str, max_count: i64, cursor: i64)
         -> Result<CommentExtractResult, PlatformError>;
 }

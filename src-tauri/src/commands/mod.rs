@@ -11,6 +11,13 @@ use tauri::{AppHandle, Manager};
 use serde::Serialize;
 use crate::core::{PublicationTask, PublicationAccountDetail, PublicationTaskWithAccounts, Comment, CommentExtractResult};
 
+// 分页评论响应结构
+#[derive(Serialize)]
+pub struct PaginatedCommentsResponse {
+    pub comments: Vec<Comment>,
+    pub total: i64,
+}
+
 // App state
 // 应用状态
 #[derive(Clone)]
@@ -1400,9 +1407,8 @@ pub async fn extract_comments(
     detail_id: &str,  // publication_accounts 表的 id
     aweme_id: &str,
     max_count: i64,
+    cursor: i64,  // 分页游标，用于增量提取
 ) -> Result<CommentExtractResult, String> {
-    tracing::info!("[Comment] Extracting comments: detail_id={}, aweme_id={}, max_count={}",
-        detail_id, aweme_id, max_count);
 
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = Arc::new(DatabaseManager::new(data_path));
@@ -1421,7 +1427,6 @@ pub async fn extract_comments(
     };
 
     let account_id = &publication_account.account_id;
-    tracing::info!("[Comment] 获取到真实的账号ID: {}", account_id);
 
     // Get account info to determine platform
     let account = match db_manager.get_account(account_id).map_err(|e| e.to_string())? {
@@ -1432,16 +1437,21 @@ pub async fn extract_comments(
         }
     };
 
-    tracing::info!("[Comment] 获取到账号: platform={:?}", account.platform);
-
     // Extract based on platform
     match account.platform {
         PlatformType::Douyin => {
-            tracing::info!("[Comment] 创建 DouyinPlatform 并开始提取");
             let douyin_platform = DouyinPlatform::with_storage((*db_manager).clone());
-            match douyin_platform.extract_comments(account_id, aweme_id, max_count).await {
+            match douyin_platform.extract_comments(account_id, aweme_id, max_count, cursor).await {
                 Ok(result) => {
                     tracing::info!("[Comment] 提取成功: {} 条评论", result.comments.len());
+
+                    // 提取成功后，更新 publication_accounts 表中的评论数
+                    if result.success {
+                        if let Err(e) = db_manager.update_publication_account_comment_count(aweme_id) {
+                            tracing::error!("[Comment] 更新评论数失败: {:?}", e);
+                        }
+                    }
+
                     Ok(result)
                 }
                 Err(e) => {
@@ -1457,38 +1467,37 @@ pub async fn extract_comments(
     }
 }
 
-/// Get comments by aweme_id
-/// 根据作品ID获取评论
-#[tauri::command]
-pub fn get_comments_by_aweme_id(app: AppHandle, aweme_id: &str) -> Result<Vec<Comment>, String> {
-    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path);
-    db_manager.get_comments_by_aweme_id(aweme_id)
-        .map_err(|e| e.to_string())
-}
-
-/// Get comments by account_id
-/// 根据账号ID获取评论
-#[tauri::command]
-pub fn get_comments_by_account_id(app: AppHandle, account_id: &str) -> Result<Vec<Comment>, String> {
-    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path);
-    db_manager.get_comments_by_account_id(account_id)
-        .map_err(|e| e.to_string())
-}
-
 /// Get comments by aweme_id with pagination
 /// 根据作品ID获取评论（分页）
 #[tauri::command]
-pub fn get_comments_by_aweme_id_paginated(
+pub fn get_comments_by_aweme_id(
     app: AppHandle,
     aweme_id: &str,
-    offset: i64,
-    limit: i64,
-) -> Result<Vec<Comment>, String> {
+    page: i64,
+    page_size: i64,
+) -> Result<PaginatedCommentsResponse, String> {
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
-    db_manager.get_comments_by_aweme_id_paginated(aweme_id, offset, limit)
+
+    tracing::info!("[Comment] 分页查询: aweme_id={}, page={}, page_size={}", aweme_id, page, page_size);
+
+    let offset = (page - 1) * page_size;
+    let comments = db_manager.get_comments_by_aweme_id_paginated(aweme_id, offset, page_size)
+        .map_err(|e| e.to_string())?;
+
+    let total = db_manager.get_comment_count(aweme_id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(PaginatedCommentsResponse { comments, total })
+}
+
+/// Delete comments by aweme_id
+/// 根据作品ID删除评论
+#[tauri::command]
+pub fn delete_comments(app: AppHandle, aweme_id: &str) -> Result<bool, String> {
+    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
+    let db_manager = DatabaseManager::new(data_path);
+    db_manager.delete_comments_by_aweme_id(aweme_id)
         .map_err(|e| e.to_string())
 }
 
@@ -1499,16 +1508,6 @@ pub fn get_comment_count(app: AppHandle, aweme_id: &str) -> Result<i64, String> 
     let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
     let db_manager = DatabaseManager::new(data_path);
     db_manager.get_comment_count(aweme_id)
-        .map_err(|e| e.to_string())
-}
-
-/// Delete comments by aweme_id
-/// 根据作品ID删除评论
-#[tauri::command]
-pub fn delete_comments(app: AppHandle, aweme_id: &str) -> Result<bool, String> {
-    let data_path = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("data"));
-    let db_manager = DatabaseManager::new(data_path);
-    db_manager.delete_comments_by_aweme_id(aweme_id)
         .map_err(|e| e.to_string())
 }
 

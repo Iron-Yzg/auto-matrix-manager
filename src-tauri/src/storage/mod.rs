@@ -1123,11 +1123,20 @@ impl DatabaseManager {
     ) -> Result<Vec<Comment>, rusqlite::Error> {
         let conn = self.get_connection()?;
 
-        let mut stmt = conn.prepare(
-            "SELECT * FROM comments WHERE aweme_id = ? ORDER BY create_time DESC LIMIT ? OFFSET ?"
-        )?;
-        let comments = stmt.query_map([aweme_id, limit.to_string().as_str(), offset.to_string().as_str()], |row| {
-            Ok(Comment {
+        // 直接构建 SQL（避免 LIMIT/OFFSET 参数绑定问题）
+        let sql = format!(
+            "SELECT id, account_id, aweme_id, comment_id, user_id, user_nickname, user_avatar, content, like_count, reply_count, create_time, status, created_at FROM comments WHERE aweme_id = '{}' ORDER BY create_time DESC LIMIT {} OFFSET {}",
+            aweme_id.replace("'", "''"), // 转义单引号
+            limit,
+            offset
+        );
+
+        let mut comments: Vec<Comment> = Vec::new();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+
+        while let Ok(Some(row)) = rows.next() {
+            comments.push(Comment {
                 id: row.get(0)?,
                 account_id: row.get(1)?,
                 aweme_id: row.get(2)?,
@@ -1136,13 +1145,13 @@ impl DatabaseManager {
                 user_nickname: row.get(5)?,
                 user_avatar: row.get(6)?,
                 content: row.get(7)?,
-                like_count: row.get::<_, String>(8)?.parse().unwrap_or(0),
-                reply_count: row.get::<_, String>(9)?.parse().unwrap_or(0),
+                like_count: row.get(8)?,
+                reply_count: row.get(9)?,
                 create_time: row.get(10)?,
-                status: Self::parse_comment_status(row.get::<_, String>(11)?),
+                status: Self::parse_comment_status(row.get(11)?),
                 created_at: row.get(12)?,
-            })
-        })?.filter_map(|r| r.ok()).collect();
+            });
+        }
 
         Ok(comments)
     }
@@ -1161,17 +1170,45 @@ impl DatabaseManager {
         Ok(count)
     }
 
-    /// Delete comments by aweme_id
-    /// 根据作品ID删除评论
+    /// Delete comments by aweme_id and update publication_accounts comment count
+    /// 根据作品ID删除评论并更新发布账号表的评论数
     pub fn delete_comments_by_aweme_id(&self, aweme_id: &str) -> Result<bool, rusqlite::Error> {
         let conn = self.get_connection()?;
 
+        // Delete comments
         let rows = conn.execute(
             "DELETE FROM comments WHERE aweme_id = ?",
             [aweme_id],
         )?;
 
+        // Update publication_accounts comment count to 0
+        conn.execute(
+            "UPDATE publication_accounts SET comments = 0 WHERE item_id = ?",
+            [aweme_id.to_string()],
+        )?;
+
         Ok(rows > 0)
+    }
+
+    /// Update publication_accounts comment count based on aweme_id
+    /// 根据作品ID更新发布账号表的评论数
+    pub fn update_publication_account_comment_count(&self, aweme_id: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.get_connection()?;
+
+        // Count comments for this aweme_id
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM comments WHERE aweme_id = ?",
+            [aweme_id],
+            |row| row.get(0)
+        )?;
+
+        // Update the publication_accounts
+        conn.execute(
+            "UPDATE publication_accounts SET comments = ? WHERE item_id = ?",
+            [count.to_string(), aweme_id.to_string()],
+        )?;
+
+        Ok(())
     }
 
     /// Parse comment status string

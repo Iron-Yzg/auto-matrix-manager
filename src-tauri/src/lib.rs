@@ -118,8 +118,6 @@ pub fn run() {
             // Comment extraction commands
             extract_comments,
             get_comments_by_aweme_id,
-            get_comments_by_account_id,
-            get_comments_by_aweme_id_paginated,
             get_comment_count,
             delete_comments,
         ])

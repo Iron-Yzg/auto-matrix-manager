@@ -14,6 +14,8 @@ use serde_json::Value;
 use uuid::Uuid;
 use chrono::Local;
 use rand::Rng;
+use reqwest;
+use std::time::Duration;
 
 /// 抖音评论API基础URL
 const COMMENT_API_URL: &str = "https://www.douyin.com/aweme/v1/web/comment/list/";
@@ -27,14 +29,12 @@ const MAX_COMMENTS: i64 = 500;
 /// 共享的异步HTTP客户端
 static ASYNC_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("Failed to create async HTTP client")
 });
 
 /// 抖音评论提取器
-///
-/// 用于从抖音视频中提取评论数据
 #[derive(Debug, Clone)]
 pub struct DouyinCommentExtractor {
     /// 用户Cookie
@@ -42,8 +42,10 @@ pub struct DouyinCommentExtractor {
     /// User-Agent
     user_agent: String,
     /// 第三方用户ID
+    #[allow(dead_code)]
     third_id: String,
     /// 本地数据
+    #[allow(dead_code)]
     local_data: Vec<LocalDataItem>,
 }
 
@@ -60,17 +62,12 @@ impl DouyinCommentExtractor {
 
     /// 从账号参数创建提取器
     pub fn from_params(params_json: &str) -> Result<Self, PlatformError> {
-        tracing::info!("[Comment] 解析账号参数...");
 
-        // 使用 AccountParams 解析（与发布功能一致的格式）
         let account_params = AccountParams::from_json(params_json);
 
         let cookie = account_params.get_cookie();
         let user_agent = account_params.get_user_agent();
         let third_id = account_params.get_third_id();
-
-        tracing::info!("[Comment] cookie长度: {}, user_agent长度: {}, third_id: {}",
-            cookie.len(), user_agent.len(), if third_id.is_empty() { "空" } else { "有值" });
 
         if cookie.is_empty() || user_agent.is_empty() {
             tracing::error!("[Comment] 账号参数不完整: cookie为空={}, user_agent为空={}",
@@ -82,105 +79,212 @@ impl DouyinCommentExtractor {
 
         let local_data = account_params.get_local_data();
 
-        tracing::info!("[Comment] local_data条数: {}", local_data.len());
-
         Ok(Self::new(cookie, user_agent, third_id, local_data))
     }
 
-    /// 提取视频评论
+    /// 提取视频评论（单页）
     ///
     /// # 参数
     ///
-    /// * `aweme_id` - 作品ID
-    /// * `max_count` - 最大提取数量（默认500，上限500）
-    ///
-    /// # 返回
-    ///
-    /// 评论提取结果
-    pub async fn extract(&self, aweme_id: &str, max_count: i64) -> Result<CommentExtractResult, PlatformError> {
-        let max_count = max_count.min(MAX_COMMENTS).max(1);
+    /// * `aweme_id` - 视频ID
+    /// * `count` - 每次提取的数量
+    /// * `cursor` - 分页游标（页码索引，0=第1页，1=第2页...）
+    pub async fn extract(&self, aweme_id: &str, count: i64, cursor: i64) -> Result<CommentExtractResult, PlatformError> {
+        let count = count.min(MAX_COMMENTS).max(1);
+        let cursor = cursor.max(0);
 
-        tracing::info!("[Comment] 开始提取评论, aweme_id: {}, max_count: {}", aweme_id, max_count);
+        // 先从视频页面获取ttwid和webid（模拟Python的get_ttwid_webid）
+        let (ttwid, webid) = match self.fetch_ttwid_webid(aweme_id).await {
+            Ok((t, w)) => (t, w),
+            Err(e) => {
+                tracing::warn!("[Comment] 获取ttwid/webid失败: {}，使用Cookie中的值", e);
+                self.parse_cookies_from_db()
+            }
+        };
 
-        let mut all_comments: Vec<Comment> = Vec::new();
-        let mut cursor = 0i64;
-        let mut total_in_aweme = 0i64;
-        let mut consecutive_empty = 0;
-        let max_empty_pages = 3; // 连续3页为空则停止
+        let ms_token = self.generate_ms_token();
 
-        // 分页提取评论
-        while (all_comments.len() as i64) < max_count {
-            // 计算本次请求的数量
-            let remaining = max_count - all_comments.len() as i64;
-            let count = if remaining >= COMMENTS_PER_PAGE { COMMENTS_PER_PAGE } else { remaining };
+        // 只提取一页，不循环
+        match self.fetch_comments_page(aweme_id, cursor, count, &ttwid, &webid, &ms_token).await {
+            Ok(page_result) => {
+                let mut page_comments = self.parse_comments(aweme_id, &page_result.comments);
 
-            tracing::info!("[Comment] 提取第 {} 页, cursor: {}, count: {}", consecutive_empty + 1, cursor, count);
-
-            match self.fetch_comments_page(aweme_id, cursor, count).await {
-                Ok(page_result) => {
-                    // 更新总数
-                    if total_in_aweme == 0 {
-                        total_in_aweme = page_result.total;
-                    }
-
-                    // 解析评论
-                    let page_comments = self.parse_comments(
-                        aweme_id,
-                        &page_result.comments,
-                    );
-
-                    if page_comments.is_empty() {
-                        consecutive_empty += 1;
-                        tracing::info!("[Comment] 第 {} 页无评论，连续空页: {}", cursor / COMMENTS_PER_PAGE, consecutive_empty);
-
-                        if consecutive_empty >= max_empty_pages {
-                            tracing::info!("[Comment] 连续 {} 页无评论，停止提取", consecutive_empty);
-                            break;
-                        }
-                    } else {
-                        consecutive_empty = 0;
-                        let page_count = page_comments.len();
-                        all_comments.extend(page_comments);
-                        tracing::info!("[Comment] 提取 {} 条评论，累计: {}/{}", page_count, all_comments.len(), total_in_aweme);
-                    }
-
-                    // 检查是否还有更多评论
-                    cursor += count;
-                    if cursor >= page_result.total {
-                        tracing::info!("[Comment] 已到达评论总数，停止提取");
-                        break;
-                    }
+                let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                for comment in &mut page_comments {
+                    comment.id = Uuid::new_v4().to_string();
+                    comment.created_at = now.clone();
                 }
-                Err(e) => {
-                    tracing::error!("[Comment] 提取评论失败: {}", e);
-                    return Ok(CommentExtractResult {
-                        success: false,
-                        total_extracted: all_comments.len() as i64,
-                        total_in_aweme,
-                        comments: all_comments,
-                        error_message: Some(format!("提取评论失败: {}", e)),
-                    });
+
+                tracing::info!("[Comment] 提取 {} 条评论，总共 {} 条", page_comments.len(), page_result.total);
+
+                Ok(CommentExtractResult {
+                    success: true,
+                    total_extracted: page_comments.len() as i64,
+                    total_in_aweme: page_result.total,
+                    comments: page_comments,
+                    error_message: None,
+                })
+            }
+            Err(e) => {
+                tracing::error!("[Comment] 提取评论失败: {}", e);
+                Ok(CommentExtractResult {
+                    success: false,
+                    total_extracted: 0,
+                    total_in_aweme: 0,
+                    comments: Vec::new(),
+                    error_message: Some(format!("提取评论失败: {}", e)),
+                })
+            }
+        }
+    }
+
+    /// 从Cookie中解析ttwid和webid
+    fn parse_cookies_from_db(&self) -> (String, String) {
+        let mut ttwid = String::new();
+        let mut webid = String::new();
+
+        for item in self.cookie.split(';') {
+            let item = item.trim();
+            if item.starts_with("ttwid=") {
+                ttwid = item["ttwid=".len()..].to_string();
+            } else if item.starts_with("webid=") {
+                webid = item["webid=".len()..].to_string();
+            }
+        }
+
+        // 如果webid不是纯数字，生成一个
+        if webid.chars().any(|c| !c.is_ascii_digit()) {
+            webid = self.generate_webid();
+        }
+
+        (ttwid, webid)
+    }
+
+    /// 从视频页面获取ttwid和webid（模拟Python的get_ttwid_webid）
+    async fn fetch_ttwid_webid(&self, aweme_id: &str) -> Result<(String, String), String> {
+        let video_url = format!("https://www.douyin.com/jingxuan?modal_id={}", aweme_id);
+
+        let response = ASYNC_CLIENT
+            .get(&video_url)
+            .header("User-Agent", &self.user_agent)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .send()
+            .await
+            .map_err(|e| format!("请求视频页面失败: {}", e))?;
+
+        // 从Set-Cookie响应头中提取ttwid
+        let ttwid = self.extract_cookie_from_headers(&response, "ttwid");
+        
+
+        let webid = self.extract_cookie_from_headers(&response, "webid");
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
+
+        // 如果Cookie中没有webid，从RENDER_DATA JSON中提取
+        let webid = if webid.is_empty() {
+            self.extract_webid_from_html(&text)
+        } else {
+            webid
+        };
+
+        if webid.is_empty() {
+            return Err("未找到webid".to_string());
+        }
+
+        Ok((ttwid, webid))
+    }
+
+    /// 从响应头Set-Cookie中提取指定cookie值
+    fn extract_cookie_from_headers(&self, response: &reqwest::Response, name: &str) -> String {
+        // 遍历所有Set-Cookie头
+        for (header_name, header_value) in response.headers() {
+            if header_name == "set-cookie" {
+                if let Ok(value) = header_value.to_str() {
+                    // Set-Cookie格式: name=value; Path=/; ...
+                    if value.starts_with(&format!("{}=", name)) {
+                        let after_name = &value[name.len() + 1..];
+                        // 找到分号的位置（cookie值的结束）
+                        if let Some(semi) = after_name.find(';') {
+                            return after_name[..semi].to_string();
+                        }
+                        return after_name.to_string();
+                    }
                 }
             }
-
-            // 添加小延迟避免请求过快
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-
-        // 生成ID
-        let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        for comment in &mut all_comments {
-            comment.id = Uuid::new_v4().to_string();
-            comment.created_at = now.clone();
+        // 如果没找到，生成一个
+        if name == "ttwid" {
+            self.generate_ttwid()
+        } else {
+            String::new()
         }
+    }
 
-        Ok(CommentExtractResult {
-            success: true,
-            total_extracted: all_comments.len() as i64,
-            total_in_aweme,
-            comments: all_comments,
-            error_message: None,
-        })
+    /// 从HTML的RENDER_DATA中提取webid
+    fn extract_webid_from_html(&self, html: &str) -> String {
+        // 使用正则提取RENDER_DATA
+        let re = regex::Regex::new(r#"<script id="RENDER_DATA" type="application/json">([^<]+)</script>"#)
+            .unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+
+        if let Some(caps) = re.captures(html) {
+            if let Some(match_) = caps.get(1) {
+                let encoded = match_.as_str();
+                // URL解码
+                let decoded = percent_encoding::percent_decode_str(encoded)
+                    .decode_utf8_lossy()
+                    .to_string();
+
+                // 尝试提取user_unique_id
+                if let Some(start) = decoded.find("\"user_unique_id\":\"") {
+                    let rest = &decoded[start + "\"user_unique_id\":\"".len()..];
+                    if let Some(end) = rest.find('"') {
+                        return rest[..end].to_string();
+                    }
+                }
+                // 也尝试不带引号的格式
+                if let Some(start) = decoded.find("user_unique_id") {
+                    let rest = &decoded[start + "user_unique_id".len()..];
+                    if rest.starts_with(":\"") {
+                        let rest = &rest[2..];
+                        if let Some(end) = rest.find('"') {
+                            return rest[..end].to_string();
+                        }
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    /// 生成ttwid
+    fn generate_ttwid(&self) -> String {
+        format!("{}", Uuid::new_v4())
+    }
+
+    /// 生成webid（19位数字）
+    fn generate_webid(&self) -> String {
+        let mut rng = rand::thread_rng();
+        let mut webid = String::with_capacity(19);
+        for _ in 0..19 {
+            webid.push(rng.gen_range(0..10).to_string().chars().next().unwrap());
+        }
+        webid
+    }
+
+    /// 生成msToken（107位随机字符串，模拟Python）
+    fn generate_ms_token(&self) -> String {
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789=";
+        let mut token = String::with_capacity(107);
+        let mut rng = rand::thread_rng();
+        for _ in 0..107 {
+            let idx = rng.gen_range(0..CHARS.len());
+            token.push(CHARS[idx] as char);
+        }
+        token
     }
 
     /// 获取单页评论
@@ -189,18 +293,14 @@ impl DouyinCommentExtractor {
         aweme_id: &str,
         cursor: i64,
         count: i64,
+        ttwid: &str,
+        webid: &str,
+        ms_token: &str,
     ) -> Result<PageResult, String> {
         tracing::info!("[Comment] fetch_comments_page: aweme_id={}, cursor={}, count={}", aweme_id, cursor, count);
 
-        // 构建URL参数
-        let webid = self.get_webid_from_cookies();
-        let ms_token = self.generate_ms_token();
-        let ttwid = self.get_ttwid();
-
-        tracing::info!("[Comment] webid: {}, ttwid: {}", webid.chars().take(10).collect::<String>(), ttwid.chars().take(10).collect::<String>());
-
-        // 构建完整URL
-        let url = format!(
+        // 构建请求URL（与Python保持一致）
+        let req_url = format!(
             "{}?device_platform=webapp&aid=6383&channel=channel_pc_web&aweme_id={}&cursor={}&count={}&item_type=0&insert_ids=&whale_cut_token=&cut_version=1&rcFT=&update_version_code=170400&pc_client_type=1&version_code=170400&version_name=17.4.0&cookie_enabled=true&screen_width=1920&screen_height=1080&browser_language=zh-CN&browser_platform=Win32&browser_name=Chrome&browser_version=123.0.0.0&browser_online=true&engine_name=Blink&engine_version=123.0.0.0&os_name=Windows&os_version=10&cpu_core_num=16&device_memory=8&platform=PC&downlink=10&effective_type=4g&round_trip_time=50&webid={}&verifyFp=verify_lwg2oa43_Ga6DRjOO_v2cd_4NL7_AHTp_qMKyKlDdoqra&fp=verify_lwg2oa43_Ga6DRjOO_v2cd_4NL7_AHTp_qMKyKlDdoqra&msToken={}",
             COMMENT_API_URL,
             aweme_id,
@@ -211,33 +311,39 @@ impl DouyinCommentExtractor {
         );
 
         // 计算a_bogus
-        let a_bogus = self.calculate_a_bogus(&url);
+        let a_bogus = self.calculate_a_bogus(&req_url);
 
-        let final_url = format!("{}&a_bogus={}", url, a_bogus);
+        let final_url = format!("{}&a_bogus={}", req_url, a_bogus);
 
-        tracing::info!("[Comment] 发送请求...");
+        let referer_url = format!("https://www.douyin.com/jingxuan?modal_id={}", aweme_id);
 
-        // 发送请求
+        // 发送请求（请求头与Python保持一致）
         let response = ASYNC_CLIENT
             .get(&final_url)
-            .header("Cookie", format!("ttwid={}", ttwid))
-            .header("User-Agent", &self.user_agent)
+            .header("sec-ch-ua", "\"Google Chrome\";v=\"123\", \"Not:A-Brand\";v=\"8\", \"Chromium\";v=\"123\"")
             .header("Accept", "application/json, text/plain, */*")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("User-Agent", &self.user_agent)
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Dest", "empty")
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-            .header("Referer", format!("https://www.douyin.com/jieunxuan?modal_id={}", aweme_id))
-            .timeout(std::time::Duration::from_secs(30))
+            .header("Referer", &referer_url)
+            .header("Cookie", format!("ttwid={};", ttwid))
+            .timeout(Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| format!("请求失败: {}", e))?;
-
-        tracing::info!("[Comment] 响应状态: {}", response.status());
 
         let text = response
             .text()
             .await
             .map_err(|e| format!("读取响应失败: {}", e))?;
 
-        tracing::info!("[Comment] 响应长度: {}", text.len());
+        if text.is_empty() {
+            return Err("响应为空".to_string());
+        }
 
         // 解析JSON
         let response_json: Value = serde_json::from_str(&text)
@@ -247,8 +353,6 @@ impl DouyinCommentExtractor {
         let status_code = response_json.get("status_code")
             .and_then(|v| v.as_i64())
             .unwrap_or(-1);
-
-        tracing::info!("[Comment] status_code: {}", status_code);
 
         if status_code != 0 {
             let msg = response_json.get("status_msg")
@@ -276,7 +380,6 @@ impl DouyinCommentExtractor {
 
     /// 解析评论数据
     fn parse_comments(&self, aweme_id: &str, comments: &[Value]) -> Vec<Comment> {
-        tracing::info!("[Comment] parse_comments: 原始评论数={}", comments.len());
 
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -289,14 +392,11 @@ impl DouyinCommentExtractor {
                 None => parse_error_count += 1,
             }
         }
-
-        tracing::info!("[Comment] parse_comments: 解析成功={}, 解析失败={}", result.len(), parse_error_count);
         result
     }
 
     /// 解析单条评论
     fn parse_single_comment(&self, c: &Value, aweme_id: &str, now: &str) -> Option<Comment> {
-        // 提取用户信息
         let user = c.get("user")?;
         let user_id = user.get("uid")?.as_str()?.to_string();
         let user_nickname = user.get("nickname")?.as_str()?.to_string();
@@ -308,13 +408,9 @@ impl DouyinCommentExtractor {
             .unwrap_or("")
             .to_string();
 
-        // 提取评论内容
         let content = c.get("text")?.as_str()?.to_string();
-
-        // 提取评论ID
         let comment_id = c.get("cid")?.as_str()?.to_string();
 
-        // 提取统计数据
         let like_count = c.get("digg_count")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
@@ -323,7 +419,6 @@ impl DouyinCommentExtractor {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        // 提取评论时间
         let create_time = c.get("create_time")
             .and_then(|v| v.as_i64())
             .map(|ts| {
@@ -335,7 +430,7 @@ impl DouyinCommentExtractor {
 
         Some(Comment {
             id: Uuid::new_v4().to_string(),
-            account_id: String::new(), // 会在外部设置
+            account_id: String::new(),
             aweme_id: aweme_id.to_string(),
             comment_id,
             user_id,
@@ -350,71 +445,59 @@ impl DouyinCommentExtractor {
         })
     }
 
-    /// 从Cookie中提取webid
-    fn get_webid_from_cookies(&self) -> String {
-        // 从Cookie中解析webid（格式类似 "webid=xxx;"）
-        self.cookie.split(';')
-            .filter_map(|s| {
-                let s = s.trim();
-                if s.starts_with("webid=") {
-                    Some(s["webid=".len()..].to_string())
-                } else {
-                    None
-                }
-            })
-            .next()
-            .unwrap_or_else(|| Uuid::new_v4().to_string().replace('-', "").chars().take(19).collect())
-    }
-
-    /// 生成msToken
-    fn generate_ms_token(&self) -> String {
-        // 简化的msToken生成
-        const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
-        let mut token = String::with_capacity(84);
-        let mut rng = rand::thread_rng();
-        for _ in 0..84 {
-            let idx = rng.gen_range(0..CHARS.len());
-            token.push(CHARS[idx] as char);
-        }
-        token
-    }
-
-    /// 获取或生成ttwid
-    fn get_ttwid(&self) -> String {
-        // 从Cookie中检查是否已有ttwid
-        self.cookie.split(';')
-            .filter_map(|s| {
-                let s = s.trim();
-                if s.starts_with("ttwid=") {
-                    Some(s["ttwid=".len()..].to_string())
-                } else {
-                    None
-                }
-            })
-            .next()
-            .unwrap_or_else(|| format!("{}", Uuid::new_v4()))
-    }
-
     /// 计算a_bogus签名
-    ///
-    /// 注意：这是简化版本，实际需要根据抖音的算法实现
-    /// 完整实现需要参考抖音前端的a_bogus计算逻辑
-    fn calculate_a_bogus(&self, _url: &str) -> String {
-        // TODO: 实现完整的a_bogus计算逻辑
-        // 抖音使用WebSDK计算a_bogus，包含URL和User-Agent
-        // 暂时返回一个占位符，实际使用时需要完整实现
+    fn calculate_a_bogus(&self, url: &str) -> String {
+        let query = if let Some(pos) = url.find('?') {
+            &url[pos + 1..]
+        } else {
+            url
+        };
 
-        // 简化版本：基于URL和UA的哈希
-        let combined = format!("{}{}", _url, self.user_agent);
-        let hash = md5::compute(combined);
-        format!("{:x}", hash)
+        // 尝试使用QuickJS
+        match self.calculate_a_bogus_with_quickjs(query) {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!("[Comment] a_bogus计算失败: {}，使用占位符", e);
+                let combined = format!("{}{}", query, self.user_agent);
+                format!("{:x}", md5::compute(combined))
+            }
+        }
+    }
+
+    /// 使用QuickJS计算a_bogus
+    fn calculate_a_bogus_with_quickjs(&self, query: &str) -> Result<String, String> {
+        let js_path = std::path::PathBuf::from("/Users/yangzhenguo/workspace/auto-matrix-manager/python/utils/a_bogus.js");
+
+        if !js_path.exists() {
+            return Err("a_bogus.js文件不存在".to_string());
+        }
+
+        let js_code = std::fs::read_to_string(&js_path)
+            .map_err(|e| format!("读取文件失败: {}", e))?;
+
+        let runtime = rquickjs::Runtime::new().map_err(|e| format!("创建JS运行时失败: {}", e))?;
+        let ctx = rquickjs::Context::builder()
+            .build(&runtime)
+            .map_err(|e| format!("创建JS上下文失败: {}", e))?;
+
+        ctx.with(|ctx| {
+            let js_bytes: Vec<u8> = js_code.into_bytes();
+            ctx.eval::<(), _>(js_bytes)
+                .map_err(|e| format!("执行JS失败: {:?}", e))?;
+
+            let func: rquickjs::Function = ctx.globals().get("generate_a_bogus")
+                .map_err(|e| format!("获取函数失败: {:?}", e))?;
+
+            let result: String = func.call((query, &self.user_agent))
+                .map_err(|e| format!("调用函数失败: {:?}", e))?;
+
+            Ok(result)
+        })
     }
 }
 
 /// 单页评论结果
 struct PageResult {
-    /// 作品总评论数
     total: i64,
-    /// 评论数组
     comments: Vec<Value>,
 }

@@ -110,19 +110,30 @@ pub struct PublicationStats {
 
 /// Comment - 评论表
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Comment {
     pub id: String,
+    #[serde(alias = "account_id")]
     pub account_id: String,        // 账号ID
+    #[serde(alias = "aweme_id")]
     pub aweme_id: String,          // 作品ID (item_id)
+    #[serde(alias = "comment_id")]
     pub comment_id: String,        // 抖音评论ID
+    #[serde(alias = "user_id")]
     pub user_id: String,           // 评论用户ID
+    #[serde(alias = "user_nickname")]
     pub user_nickname: String,     // 评论用户昵称
+    #[serde(alias = "user_avatar")]
     pub user_avatar: String,       // 评论用户头像
     pub content: String,           // 评论内容
+    #[serde(alias = "like_count")]
     pub like_count: i64,           // 点赞数
+    #[serde(alias = "reply_count")]
     pub reply_count: i64,          // 回复数
+    #[serde(alias = "create_time")]
     pub create_time: String,       // 评论时间
     pub status: CommentStatus,     // 状态
+    #[serde(alias = "created_at")]
     pub created_at: String,        // 入库时间
 }
 
