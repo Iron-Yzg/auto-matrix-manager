@@ -366,41 +366,7 @@ async function main() {
             const url = response.url();
             const status = response.status();
 
-            // ========== API 匹配模式的登录成功检测 ==========
-            if (isApiMatchMode && !loginSuccess && loginApiPath && url.includes(loginApiPath)) {
-                info(`[API登录检测] 收到响应: ${url} (status: ${status})`);
-
-                if (status >= 200 && status < 300) {
-                    const contentType = response.headers()['content-type'] || '';
-                    if (contentType.includes('application/json')) {
-                        try {
-                            const body = await response.json();
-                            const bodyStr = JSON.stringify(body);
-                            info(`[API登录检测] 响应内容: ${bodyStr.substring(0, 500)}${bodyStr.length > 500 ? '...' : ''}`);
-
-                            // 使用 RuleParser 解析规则并提取值
-                            const extractedValue = evaluateRule(loginApiRule, { [url]: { url, requestHeaders: response.request().headers(), responseBody: body } }, {});
-
-                            info(`[API登录检测] 提取的值: "${extractedValue}"`);
-                            info(`[API登录检测] 比对: "${extractedValue}" ${loginOperator} "${loginExpectedValue}"`);
-
-                            if (matchValue(extractedValue, loginOperator, loginExpectedValue)) {
-                                info(`[API登录检测] ✅ 匹配成功! 检测到登录成功!`);
-                                loginSuccess = true;
-                            } else {
-                                info(`[API登录检测] ❌ 匹配未通过`);
-                            }
-                        } catch (e) {
-                            error(`[API登录检测] 解析响应失败: ${e.message}`);
-                        }
-                    } else {
-                        info(`[API登录检测] 跳过: content-type 不是 JSON (${contentType})`);
-                    }
-                }
-            }
-            // =================================================
-
-            // 检查是否是需要捕获的 API
+            // 检查是否是需要捕获的 API（用于提取数据）
             let matchedPath = null;
             for (const apiPath of apiPaths) {
                 if (url.includes(apiPath)) {
@@ -445,12 +411,50 @@ async function main() {
         info('等待登录...');
 
         if (isApiMatchMode) {
-            // API 匹配模式：等待 loginSuccess 变为 true
+            // API 匹配模式：使用 waitForResponse 等待登录 API
             info('[等待登录] 使用 API 匹配模式，等待检测到登录成功...');
-            while (!loginSuccess) {
-                await new Promise(resolve => setTimeout(resolve, 500));
+            logSync(`[TRACE] 开始等待 API: ${loginApiPath}`);
+
+            try {
+                const response = await page.waitForResponse(
+                    response => {
+                        const url = response.url();
+                        const status = response.status();
+                        // 检查 URL 匹配和状态码
+                        return url.includes(loginApiPath) && status >= 200 && status < 300;
+                    },
+                    { timeout: 0 } // 无限等待
+                );
+
+                logSync('[TRACE] 收到登录 API 响应');
+                info(`[API登录检测] 收到响应: ${response.url()} (status: ${response.status()})`);
+
+                // 检查 content-type
+                const contentType = response.headers()['content-type'] || '';
+                if (contentType.includes('application/json')) {
+                    const body = await response.json();
+                    const bodyStr = JSON.stringify(body);
+                    info(`[API登录检测] 响应内容: ${bodyStr.substring(0, 500)}${bodyStr.length > 500 ? '...' : ''}`);
+
+                    // 使用 RuleParser 解析规则并提取值
+                    const extractedValue = evaluateRule(loginApiRule, { [response.url()]: { url: response.url(), requestHeaders: response.request().headers(), responseBody: body } }, {});
+
+                    info(`[API登录检测] 提取的值: "${extractedValue}"`);
+                    info(`[API登录检测] 比对: "${extractedValue}" ${loginOperator} "${loginExpectedValue}"`);
+
+                    if (matchValue(extractedValue, loginOperator, loginExpectedValue)) {
+                        info(`[API登录检测] ✅ 匹配成功! 检测到登录成功!`);
+                        logSync('[TRACE] API 匹配成功');
+                    } else {
+                        info(`[API登录检测] ❌ 匹配未通过，API 返回了响应但内容不匹配`);
+                        logSync('[TRACE] API 响应内容不匹配');
+                    }
+                } else {
+                    info(`[API登录检测] 跳过: content-type 不是 JSON (${contentType})`);
+                }
+            } catch (e) {
+                error(`[等待登录] 等待 API 响应失败: ${e.message}`);
             }
-            info('[等待登录] ✅ 检测到登录成功 (API 匹配)');
         } else {
             // URL 匹配模式：等待 URL 变化
             if (config.login_success_pattern) {
@@ -540,9 +544,6 @@ async function main() {
             info(`  ${url}`);
         }
         info('');
-        info('extractedData (用户信息提取结果):');
-        info(JSON.stringify(extractedData, null, 2));
-        info('');
         info('extractedData 空字段检查:');
         for (const [key, value] of Object.entries(extractedData)) {
             if (value === '') {
@@ -553,7 +554,6 @@ async function main() {
         }
         info('');
         info(`localStorageItems长度: ${localStorageItems.length}`);
-        info(`localStorageItems 前100字符: ${cookie.substring(0, 100)}...`);
         info(`cookie 长度: ${cookie.length}`);
         info(`cookie 前100字符: ${cookie.substring(0, 100)}...`);
         info('===================================');
@@ -617,11 +617,11 @@ async function main() {
             info(`结果已保存到: ${outputFile}`);
         }
 
-        // 输出结果
+        // 输出结果 - 使用标记格式以便Rust解析
         console.log('RESULT_JSON_START');
         console.log(JSON.stringify(result));
         console.log('RESULT_JSON_END');
-        info(`授权完成: ${result.nickname}`);
+        info(`授权完成: ${result.user_info.nickname}`);
 
     } catch (err) {
         error(`错误: ${err.message}`);

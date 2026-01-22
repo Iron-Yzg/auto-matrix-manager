@@ -196,92 +196,51 @@ impl GenericBrowser {
             .env("AMM_CONFIG", &config_json)
             .current_dir(&playwright_dir)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())  // stderr 直接输出，实时打印
             .spawn()
             .map_err(|e| format!("无法启动脚本: {}", e))?;
 
         eprintln!("[GenericBrowser] Node.js 进程已启动, pid: {}", child.id());
 
         let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
 
-        // 使用 mpsc 通道来实时传输 stderr 日志
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // 读取 stderr 的线程
-        let stderr_handle = std::thread::spawn(move || {
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send(line).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        // 读取 stdout，提取结果，同时打印 stderr
+        // 读取 stdout，提取结果
         let reader = std::io::BufReader::new(stdout);
         let mut result_lines = Vec::new();
         let mut in_result = false;
 
         eprintln!("[GenericBrowser] 开始读取输出...");
 
-        // 使用 select 模式同时读取 stdout 和 stderr
+        // 只读取 stdout
         let mut stdout_lines = reader.lines();
         loop {
-            // 优先检查 stderr 是否有新行
-            match rx.try_recv() {
-                Ok(line) => {
-                    println!("[Node.js] {}", line);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // 没有新的 stderr，尝试读取 stdout
-                    match stdout_lines.next() {
-                        Some(Ok(line)) => {
-                            if line == "RESULT_JSON_START" {
-                                in_result = true;
-                                result_lines.clear();
-                            } else if line == "RESULT_JSON_END" {
-                                eprintln!("[GenericBrowser] 收到 RESULT_JSON_END");
-                                break;
-                            } else if in_result {
-                                result_lines.push(line);
-                            }
-                        }
-                        Some(Err(e)) => {
-                            eprintln!("[GenericBrowser] 读取 stdout 错误: {}", e);
-                            break;
-                        }
-                        None => {
-                            eprintln!("[GenericBrowser] stdout 结束");
-                            // stdout 结束了，等待 stderr 线程完成
-                            break;
-                        }
+            match stdout_lines.next() {
+                Some(Ok(line)) => {
+                    if line == "RESULT_JSON_START" {
+                        in_result = true;
+                        result_lines.clear();
+                    } else if line == "RESULT_JSON_END" {
+                        eprintln!("[GenericBrowser] 收到 RESULT_JSON_END");
+                        break;
+                    } else if in_result {
+                        result_lines.push(line);
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    eprintln!("[GenericBrowser] stderr 通道断开");
-                    // stderr 线程结束了，继续读取 stdout
+                Some(Err(e)) => {
+                    eprintln!("[GenericBrowser] 读取 stdout 错误: {}", e);
+                    break;
+                }
+                None => {
+                    eprintln!("[GenericBrowser] stdout 结束");
                     break;
                 }
             }
-        }
-
-        // 打印剩余的 stderr
-        while let Ok(line) = rx.try_recv() {
-            println!("[Node.js] {}", line);
         }
 
         eprintln!("[GenericBrowser] 等待进程结束...");
         // 等待进程结束
         let status = child.wait()
             .map_err(|e| format!("等待脚本结束失败: {}", e))?;
-
-        stderr_handle.join().ok();
 
         eprintln!("[GenericBrowser] 进程结束, status: {}", status);
 
