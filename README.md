@@ -1,7 +1,69 @@
-# Tauri + Vue + TypeScript
+# Auto Matrix Manager
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+一个跨平台社交媒体矩阵账号管理工具，支持多账号自动化授权、数据提取和内容发布。
 
-## Recommended IDE Setup
+## 功能特性
 
-- [VS Code](https://code.visualstudio.com/) + [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+### 账号授权管理
+- 支持多平台社交媒体账号的授权管理
+- 通用规则引擎，可灵活配置不同平台的登录和数据提取规则
+- 可视化配置界面，支持 API 匹配、URL 匹配等多种登录成功检测模式
+
+### 数据提取
+- 自动从授权后的页面中提取用户信息（昵称、头像、用户 ID 等）
+- 自动获取 Cookie、LocalStorage、请求头等认证数据
+- 支持自定义数据提取规则
+
+### 平台支持
+- 抖音（已测试可用）
+- 小红书（已测试可用）
+- 通过配置化方式支持更多平台
+
+## 使用说明
+
+1. **添加平台配置**：在设置中配置平台的登录 URL、登录成功检测规则和数据提取规则
+2. **授权账号**：点击授权按钮，浏览器将打开登录页面
+3. **完成登录**：扫码或账号密码登录，脚本将自动检测登录状态并提取数据
+4. **管理账号**：授权成功后可在账号管理页面查看和管理已授权的账号
+
+## 技术栈
+
+- **前端**：Vue 3 + TypeScript
+- **桌面框架**：Tauri 2.0
+- **浏览器自动化**：Playwright
+- **数据存储**：SQLite
+
+## 开发命令
+
+### 前端开发
+
+```bash
+# 启动前端开发服务器
+pnpm dev
+
+# 构建前端生产版本
+pnpm build
+```
+
+### Tauri 开发
+
+```bash
+# 完整开发模式（同时启动前后端）
+pnpm dev:full
+
+# 仅启动 Rust 后端开发服务器
+pnpm rust:dev
+
+# 构建 Rust 调试版本
+pnpm rust:build
+
+# 构建生产版本
+pnpm rust:release
+
+# 构建 Tauri 安装包
+pnpm tauri:build
+```
+
+## 许可证
+
+MIT
