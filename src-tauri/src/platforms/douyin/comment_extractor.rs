@@ -20,9 +20,6 @@ use std::time::Duration;
 /// 抖音评论API基础URL
 const COMMENT_API_URL: &str = "https://www.douyin.com/aweme/v1/web/comment/list/";
 
-/// 每页评论数
-const COMMENTS_PER_PAGE: i64 = 50;
-
 /// 最大提取评论数
 const MAX_COMMENTS: i64 = 500;
 
@@ -384,12 +381,10 @@ impl DouyinCommentExtractor {
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut result = Vec::new();
-        let mut parse_error_count = 0;
 
         for c in comments.iter() {
-            match self.parse_single_comment(c, aweme_id, &now) {
-                Some(comment) => result.push(comment),
-                None => parse_error_count += 1,
+            if let Some(comment) = self.parse_single_comment(c, aweme_id, &now) {
+                result.push(comment);
             }
         }
         result
